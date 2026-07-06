@@ -784,7 +784,282 @@ out(ws,fv,2,f'={ZR_FEED}')
 out(ws,fv,3,f'={ZR_FEED}*{K1}')
 out(ws,fv,4,f'={ZR_FEED}*{K2}')
 
-# ── Save ───────────────────────────────────────────────────────────────────────
-OUT="SX_Steady_State_Model_26elem.xlsx"
+# ══════════════════════════════════════════════════════════════════════════════
+# TREEMAP CHARTS — injected as Excel 2016+ cx:chart XML
+# Three treemaps: Feed | Raffinate | Pregnant solution
+# Each shows the 26 elements sized by concentration.
+# We build a data table then inject the chart XML into the zip archive.
+# ══════════════════════════════════════════════════════════════════════════════
+import zipfile, shutil, os, re as _re
+
+TREE_START = fv + 4
+ws.row_dimensions[TREE_START].height = 18
+ws.merge_cells(f"A{TREE_START}:{get_column_letter(N_EL+1)}{TREE_START}")
+c = ws.cell(row=TREE_START, column=1,
+            value="TREEMAP DATA — Feed / Raffinate / Pregnant  (g/L)  → rendered as Treemap charts in Excel 2016+")
+c.fill = fl(C["SECHDR"]); c.font = fn("FFFFFF", bold=True, sz=11); c.alignment = al()
+
+# Column headers
+TM_HDR = TREE_START + 1
+ws.row_dimensions[TM_HDR].height = 16
+hdr(ws, TM_HDR, 1, "Element")
+hdr(ws, TM_HDR, 2, "Feed (g/L)", bg=C["EXT_T"], fg=C["SECHDR"])
+hdr(ws, TM_HDR, 3, "Raffinate (g/L)", bg=C["SCR_T"], fg=C["SECHDR"])
+hdr(ws, TM_HDR, 4, "Pregnant (g/L)", bg=C["STR_T"], fg=C["SECHDR"])
+hdr(ws, TM_HDR, 5, "Group")
+
+TM_DATA = TM_HDR + 1
+# Element groups for treemap hierarchy
+GROUPS = {
+    "Al":"Light metals","Sc":"Transition","Fe":"Transition","Co":"Transition",
+    "Zn":"Transition","Ga":"Post-transition","Rb":"Alkali","Y":"REE",
+    "Zr":"HFSEs","La":"REE","Ce":"REE","Pr":"REE","Nd":"REE","Sm":"REE",
+    "Eu":"REE","Gd":"REE","Tb":"REE","Dy":"REE","Ho":"REE","Er":"REE",
+    "Tm":"REE","Yb":"REE","Lu":"REE","Hf":"HFSEs","Th":"Actinides","U":"Actinides",
+}
+
+TM_ROWS = {}   # elem -> row number in treemap table
+for e_idx, elem in enumerate(ELEMENTS):
+    r = TM_DATA + e_idx
+    ws.row_dimensions[r].height = 14
+    sc(ws, r, 1, C["STEP_BG"], C["STEP_FG"], val=elem)
+    # Feed = Panel C input
+    feed_ref = PC_CELLS[elem]["XF"]
+    calc(ws, r, 2, f"={feed_ref}")
+    # Raffinate = Panel D raffinate output
+    ec = ELEM_COLS[elem]
+    raff_addr = ad(STAGE_ROW_START, ec["x_aq"])
+    calc(ws, r, 3, f"={raff_addr}")
+    # Pregnant = INDEX result
+    xcol = get_column_letter(ec["x_aq"])
+    xrange = f'{xcol}{STAGE_ROW_START}:{xcol}{STAGE_ROW_START+N_STAGES-1}'
+    calc(ws, r, 4,
+         f'=IFERROR(INDEX({xrange},{N_EXT_REF}+{N_SCR_REF}+{N_STR_REF}),0)')
+    sc(ws, r, 5, C["REF_BG"], C["REF_FG"], val=GROUPS.get(elem,"Other"), h="left")
+    TM_ROWS[elem] = r
+
+# ── Save base file first ───────────────────────────────────────────────────────
+OUT = "SX_Steady_State_Model_26elem.xlsx"
 wb.save(OUT)
-print(f"Saved: {OUT}")
+
+# ── Inject treemap charts via zip manipulation ─────────────────────────────────
+# Treemap uses the DrawingML chart extension (cx namespace), not the legacy c: namespace.
+# We create 3 chart XML files and wire them into 3 drawings on the sheet.
+
+SHEET_NAME = "SX Model"
+SHEET_FNAME = "xl/worksheets/sheet1.xml"
+
+# Row/col references for the treemap data table (1-indexed, used in cx:f formulas)
+# Data: col A=element label (col1), col B=Feed(col2), col C=Raff(col3), col D=Preg(col4), col E=Group(col5)
+# Rows TM_DATA to TM_DATA+N_EL-1
+def sheet_range(col, row_start, row_end):
+    return f"'SX Model'!${get_column_letter(col)}${row_start}:${get_column_letter(col)}${row_end}"
+
+r0 = TM_DATA
+r1 = TM_DATA + N_EL - 1
+
+# Build a cx:chart XML for one data column (col_idx: 2=Feed,3=Raff,4=Preg)
+def cx_chart_xml(chart_title, data_col, label_col=1, group_col=5):
+    data_ref   = sheet_range(data_col,  r0, r1)
+    label_ref  = sheet_range(label_col, r0, r1)
+    group_ref  = sheet_range(group_col, r0, r1)
+    return f"""<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<cx:chartSpace xmlns:cx="http://schemas.microsoft.com/office/drawing/2016/5/9/chartex"
+               xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"
+               xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+  <cx:chartData>
+    <cx:externalData r:id="rId1"/>
+    <cx:data id="0">
+      <cx:strDim type="cat">
+        <cx:f>{group_ref}</cx:f>
+      </cx:strDim>
+      <cx:strDim type="cat">
+        <cx:f>{label_ref}</cx:f>
+      </cx:strDim>
+      <cx:numDim type="val">
+        <cx:f>{data_ref}</cx:f>
+      </cx:numDim>
+    </cx:data>
+  </cx:chartData>
+  <cx:chart>
+    <cx:title overlay="0">
+      <cx:tx>
+        <cx:rich>
+          <a:bodyPr/>
+          <a:lstStyle/>
+          <a:p><a:r><a:t>{chart_title}</a:t></a:r></a:p>
+        </cx:rich>
+      </cx:tx>
+    </cx:title>
+    <cx:plotArea>
+      <cx:plotAreaRegion>
+        <cx:series layoutId="treemap" ownsLabel="1" formatIdx="0" uniqueId="{{00000000-0000-0000-0000-00000000000{data_col}}}">
+          <cx:dataId val="0"/>
+          <cx:layoutPr>
+            <cx:visibility headerSelect="1" outlineSelect="1"/>
+          </cx:layoutPr>
+        </cx:series>
+      </cx:plotAreaRegion>
+    </cx:plotArea>
+    <cx:legend>
+      <cx:visibility val="0"/>
+    </cx:legend>
+  </cx:chart>
+  <cx:clrMapOvr>
+    <a:overrideClrMapping/>
+  </cx:clrMapOvr>
+</cx:chartSpace>"""
+
+CHARTS = [
+    ("Feed Concentration (g/L) — 26 Elements",       2),
+    ("Raffinate Concentration (g/L) — 26 Elements",  3),
+    ("Pregnant Solution (g/L) — 26 Elements",        4),
+]
+
+# Drawing XML for one chart, anchored at a given row offset
+def drawing_xml(chart_rels):
+    """chart_rels: list of (rId, col_from, row_from, col_to, row_to)"""
+    anchors = ""
+    for rId, cf, rf, ct, rt in chart_rels:
+        anchors += f"""  <xdr:twoCellAnchor moveWithCells="1">
+    <xdr:from><xdr:col>{cf}</xdr:col><xdr:colOff>0</xdr:colOff>
+              <xdr:row>{rf}</xdr:row><xdr:rowOff>0</xdr:rowOff></xdr:from>
+    <xdr:to>  <xdr:col>{ct}</xdr:col><xdr:colOff>0</xdr:colOff>
+              <xdr:row>{rt}</xdr:row><xdr:rowOff>0</xdr:rowOff></xdr:to>
+    <xdr:graphicFrame macro="">
+      <xdr:nvGraphicFramePr>
+        <xdr:cNvPr id="2" name="Chart"/>
+        <xdr:cNvGraphicFramePr/>
+      </xdr:nvGraphicFramePr>
+      <xdr:xfrm><a:off x="0" y="0"/><a:ext cx="0" cy="0"/></xdr:xfrm>
+      <a:graphic>
+        <a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/chart">
+          <c:chart xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart"
+                   r:id="{rId}"/>
+        </a:graphicData>
+      </a:graphic>
+    </xdr:graphicFrame>
+    <xdr:clientData/>
+  </xdr:twoCellAnchor>
+"""
+    return f"""<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<xdr:wsDr xmlns:xdr="http://schemas.openxmlformats.org/drawingml/2006/spreadsheetDrawing"
+          xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"
+          xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+{anchors}</xdr:wsDr>"""
+
+def drawing_rels_xml(chart_entries):
+    """chart_entries: list of (rId, chart_fname_in_xl)"""
+    items = ""
+    for rId, chart_fname in chart_entries:
+        target = chart_fname.replace("xl/","../")
+        items += f'  <Relationship Id="{rId}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/chart" Target="{target}"/>\n'
+    return f"""<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+{items}</Relationships>"""
+
+def chart_rels_xml(sheet_fname):
+    """Each cx chart references the workbook as external data."""
+    wb_target = "../../workbook.xml"
+    return f"""<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/package" Target="{wb_target}"/>
+</Relationships>"""
+
+# Content-type for cx charts
+CX_CONTENT_TYPE = ("http://schemas.microsoft.com/office/drawing/2016/5/9/chartex+xml")
+
+# Patch the xlsx zip
+tmp = OUT + ".tmp"
+shutil.copy(OUT, tmp)
+
+with zipfile.ZipFile(tmp, "r") as zin, zipfile.ZipFile(OUT, "w", zipfile.ZIP_DEFLATED) as zout:
+    names = zin.namelist()
+
+    # Find existing drawing count and chart count
+    existing_drawings = [n for n in names if _re.match(r"xl/drawings/drawing\d+\.xml$", n)]
+    existing_charts   = [n for n in names if _re.match(r"xl/charts/chart\d+\.xml$", n)]
+    existing_chartex  = [n for n in names if _re.match(r"xl/charts/chartEx\d+\.xml$", n)]
+
+    next_drawing_idx = len(existing_drawings) + 1
+    next_chart_idx   = len(existing_charts) + len(existing_chartex) + 1
+
+    # Build new file entries
+    new_files = {}
+    chart_fnames = []
+    for i, (title, data_col) in enumerate(CHARTS):
+        cx_fname = f"xl/charts/chartEx{i+1}.xml"
+        cx_rels_fname = f"xl/charts/_rels/chartEx{i+1}.xml.rels"
+        new_files[cx_fname] = cx_chart_xml(title, data_col).encode()
+        new_files[cx_rels_fname] = chart_rels_xml(SHEET_FNAME).encode()
+        chart_fnames.append(cx_fname)
+
+    # One drawing with 3 charts side by side (cols 0-9, 10-19, 20-29)
+    drawing_fname = f"xl/drawings/drawing{next_drawing_idx}.xml"
+    drawing_rels_fname = f"xl/drawings/_rels/drawing{next_drawing_idx}.xml.rels"
+    anchor_row_0 = TM_DATA + N_EL + 2  # 0-indexed for DrawingML
+    chart_anchors = [
+        ("rId1",  0,  anchor_row_0,  9,  anchor_row_0+30),
+        ("rId2",  10, anchor_row_0,  19, anchor_row_0+30),
+        ("rId3",  20, anchor_row_0,  29, anchor_row_0+30),
+    ]
+    new_files[drawing_fname] = drawing_xml(chart_anchors).encode()
+    new_files[drawing_rels_fname] = drawing_rels_xml(
+        [("rId1", chart_fnames[0]),
+         ("rId2", chart_fnames[1]),
+         ("rId3", chart_fnames[2])]).encode()
+
+    # Patch [Content_Types].xml
+    CT_FNAME = "[Content_Types].xml"
+    ct_xml = zin.read(CT_FNAME).decode()
+    # Add cx chart content type override if not present
+    if "chartex" not in ct_xml.lower():
+        for i in range(len(CHARTS)):
+            override = (f'<Override PartName="/xl/charts/chartEx{i+1}.xml" '
+                        f'ContentType="{CX_CONTENT_TYPE}"/>')
+            ct_xml = ct_xml.replace("</Types>", override + "\n</Types>")
+    # Add drawing content type
+    drawing_ct = (f'<Override PartName="/xl/drawings/drawing{next_drawing_idx}.xml" '
+                  f'ContentType="application/vnd.openxmlformats-officedocument.drawing+xml"/>')
+    if f'drawing{next_drawing_idx}.xml' not in ct_xml:
+        ct_xml = ct_xml.replace("</Types>", drawing_ct + "\n</Types>")
+    new_files[CT_FNAME] = ct_xml.encode()
+
+    # Patch sheet1 relationships to add drawing reference
+    sheet_rels_fname = "xl/worksheets/_rels/sheet1.xml.rels"
+    if sheet_rels_fname in names:
+        sr_xml = zin.read(sheet_rels_fname).decode()
+    else:
+        sr_xml = ('<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n'
+                  '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">\n'
+                  '</Relationships>')
+    # Find next rId in sheet rels
+    existing_rids = _re.findall(r'Id="rId(\d+)"', sr_xml)
+    next_rid = max((int(x) for x in existing_rids), default=0) + 1
+    drawing_rel = (f'  <Relationship Id="rId{next_rid}" '
+                   f'Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/drawing" '
+                   f'Target="../drawings/drawing{next_drawing_idx}.xml"/>')
+    sr_xml = sr_xml.replace("</Relationships>", drawing_rel + "\n</Relationships>")
+    new_files[sheet_rels_fname] = sr_xml.encode()
+
+    # Patch sheet1.xml to add <drawing> element
+    sh_xml = zin.read(SHEET_FNAME).decode()
+    drawing_elem = f'<drawing r:id="rId{next_rid}"/>'
+    if drawing_elem not in sh_xml:
+        # Insert before </worksheet>
+        sh_xml = sh_xml.replace("</worksheet>", drawing_elem + "</worksheet>")
+    new_files[SHEET_FNAME] = sh_xml.encode()
+
+    # Copy all existing files, replacing patched ones
+    for name in names:
+        if name in new_files:
+            zout.writestr(name, new_files.pop(name))
+        else:
+            zout.writestr(name, zin.read(name))
+
+    # Write genuinely new files
+    for fname, data in new_files.items():
+        zout.writestr(fname, data)
+
+os.remove(tmp)
+print(f"Saved: {OUT}  (with 3 Treemap charts)")
