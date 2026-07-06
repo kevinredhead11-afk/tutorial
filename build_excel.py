@@ -1,1095 +1,790 @@
 """
-build_excel.py
-Generates SX_Steady_State_Model_UThHfZr.xlsx
-Primene JMT / dual-acid SX model: H2SO4 loading, HNO3 stripping
-Elements: U, Th, Hf, Zr   |   openpyxl only
+build_excel.py  —  SX_Steady_State_Model_26elem.xlsx
+Primene JMT / dual-acid SX  |  H2SO4 loading, HNO3 stripping
+26 elements: Al Sc Fe Co Zn Ga Rb Y Zr La Ce Pr Nd Sm Eu Gd Tb Dy Ho Er Tm Yb Lu Hf Th U
+openpyxl only
 """
 
 from openpyxl import Workbook
-from openpyxl.styles import (PatternFill, Font, Alignment, Border, Side,
-                              GradientFill)
-from openpyxl.utils import get_column_letter, column_index_from_string
-from openpyxl.chart import ScatterChart, Reference, Series
-from openpyxl.chart.series import SeriesLabel
-from openpyxl.formatting.rule import ColorScaleRule
-import re
+from openpyxl.styles import PatternFill, Font, Alignment, Border, Side
+from openpyxl.utils import get_column_letter
+from openpyxl.chart import LineChart, ScatterChart, Reference, Series
 
-# ── Colour palette ────────────────────────────────────────────────────────────
-C = {
-    "INPUT_BG":  "FFFDE7", "INPUT_FG":  "1A237E",
-    "CALC_BG":   "FFFFFF", "CALC_FG":   "212121",
-    "STEP_BG":   "E8EAF6", "STEP_FG":   "212121",
-    "OUTPUT_BG": "F1F8E9", "OUTPUT_FG": "2E7D32",
-    "REF_BG":    "E3F2FD", "REF_FG":    "0D47A1",
-    "TITLE":     "1B3A6B",
-    "SECHDR":    "2E4057",
-    "COLHDR":    "4A6FA5",
-    "EXT_TINT":  "FFFDE7",
-    "SCR_TINT":  "F3E5F5",
-    "STR_TINT":  "E8F5E9",
-    "HDR_FG":    "FFFFFF",
-    "WARN":      "FF5722",
+# ── Element definitions ────────────────────────────────────────────────────────
+ELEMENTS = [
+    "Al","Sc","Fe","Co","Zn","Ga","Rb","Y","Zr",
+    "La","Ce","Pr","Nd","Sm","Eu","Gd","Tb","Dy",
+    "Ho","Er","Tm","Yb","Lu","Hf","Th","U",
+]
+N_EL = len(ELEMENTS)  # 26
+
+MW = {
+    "Al":26.98, "Sc":44.96, "Fe":55.85, "Co":58.93,
+    "Zn":65.38, "Ga":69.72, "Rb":85.47, "Y":88.91,
+    "Zr":91.22, "La":138.91,"Ce":140.12,"Pr":140.91,
+    "Nd":144.24,"Sm":150.36,"Eu":151.96,"Gd":157.25,
+    "Tb":158.93,"Dy":162.50,"Ho":164.93,"Er":167.26,
+    "Tm":168.93,"Yb":173.04,"Lu":174.97,"Hf":178.49,
+    "Th":232.04,"U":238.03,
 }
 
-def fill(hex_bg):
-    return PatternFill("solid", fgColor=hex_bg)
+FEED_DEF = {e: 0.1 for e in ELEMENTS}
+FEED_DEF.update({"Zr":1.0,"Hf":0.5,"Th":2.0,"U":5.0,
+                  "La":0.5,"Ce":0.5,"Nd":0.3,"Y":0.2})
 
-def font(hex_fg, bold=False, sz=10):
-    return Font(color=hex_fg, bold=bold, size=sz, name="Calibri")
+# Default P/Q when regression has < 2 points
+P_DEF = {e: 1.0 for e in ELEMENTS}
+Q_DEF_LOAD = {e: -1.0 for e in ELEMENTS}
+Q_DEF_STRIP= {e: -1.2 for e in ELEMENTS}
 
-def center():
-    return Alignment(horizontal="center", vertical="center", wrap_text=True)
+N_STAGES = 25
 
-def left():
-    return Alignment(horizontal="left", vertical="center", wrap_text=True)
+# ── Colour palette ─────────────────────────────────────────────────────────────
+C = {
+    "INPUT_BG":"FFFDE7","INPUT_FG":"1A237E",
+    "CALC_BG" :"FFFFFF","CALC_FG" :"212121",
+    "STEP_BG" :"E8EAF6","STEP_FG" :"212121",
+    "OUT_BG"  :"F1F8E9","OUT_FG"  :"2E7D32",
+    "REF_BG"  :"E3F2FD","REF_FG"  :"0D47A1",
+    "TITLE"   :"1B3A6B","SECHDR"  :"2E4057","COLHDR":"4A6FA5",
+    "EXT_T"   :"FFFDE7","SCR_T"   :"F3E5F5","STR_T" :"E8F5E9",
+    "HDR_FG"  :"FFFFFF",
+}
 
-def thin_border():
-    s = Side(style="thin", color="BDBDBD")
-    return Border(left=s, right=s, top=s, bottom=s)
+def fl(hex_bg): return PatternFill("solid",fgColor=hex_bg)
+def fn(hex_fg,bold=False,sz=9): return Font(color=hex_fg,bold=bold,size=sz,name="Calibri")
+def al(h="center"): return Alignment(horizontal=h,vertical="center",wrap_text=True)
+def bd():
+    s=Side(style="thin",color="BDBDBD")
+    return Border(left=s,right=s,top=s,bottom=s)
 
-def style_cell(ws, row, col, bg, fg, bold=False, align="center", sz=10,
-               border=True, val=None):
-    c = ws.cell(row=row, column=col)
-    if val is not None:
-        c.value = val
-    c.fill = fill(bg)
-    c.font = font(fg, bold=bold, sz=sz)
-    c.alignment = center() if align == "center" else left()
-    if border:
-        c.border = thin_border()
+def sc(ws,row,col,bg,fg,bold=False,val=None,h="center",sz=9):
+    c=ws.cell(row=row,column=col)
+    if val is not None: c.value=val
+    c.fill=fl(bg); c.font=fn(fg,bold,sz)
+    c.alignment=al(h); c.border=bd()
     return c
 
-def hdr(ws, row, col, text, span=1, bg=None, fg=None, sz=10, bold=True):
-    bg = bg or C["COLHDR"]
-    fg = fg or C["HDR_FG"]
-    c = ws.cell(row=row, column=col, value=text)
-    c.fill = fill(bg)
-    c.font = font(fg, bold=bold, sz=sz)
-    c.alignment = center()
-    c.border = thin_border()
-    if span > 1:
-        ws.merge_cells(start_row=row, start_column=col,
-                       end_row=row, end_column=col+span-1)
+def hdr(ws,row,col,text,span=1,bg=None,fg=None,sz=9,bold=True):
+    bg=bg or C["COLHDR"]; fg=fg or C["HDR_FG"]
+    if span>1:
+        ws.merge_cells(start_row=row,start_column=col,
+                       end_row=row,end_column=col+span-1)
+    c=ws.cell(row=row,column=col,value=text)
+    c.fill=fl(bg);c.font=fn(fg,bold,sz)
+    c.alignment=al();c.border=bd()
     return c
 
-def inp(ws, row, col, val=None):
-    c = ws.cell(row=row, column=col)
-    if val is not None:
-        c.value = val
-    c.fill = fill(C["INPUT_BG"])
-    c.font = font(C["INPUT_FG"])
-    c.alignment = center()
-    c.border = thin_border()
+def inp(ws,row,col,val=None):
+    c=ws.cell(row=row,column=col)
+    if val is not None: c.value=val
+    c.fill=fl(C["INPUT_BG"]);c.font=fn(C["INPUT_FG"])
+    c.alignment=al();c.border=bd()
     return c
 
-def out(ws, row, col, formula=None):
-    c = ws.cell(row=row, column=col)
-    if formula is not None:
-        c.value = formula
-    c.fill = fill(C["OUTPUT_BG"])
-    c.font = font(C["OUTPUT_FG"])
-    c.alignment = center()
-    c.border = thin_border()
+def out(ws,row,col,formula=None):
+    c=ws.cell(row=row,column=col)
+    if formula is not None: c.value=formula
+    c.fill=fl(C["OUT_BG"]);c.font=fn(C["OUT_FG"])
+    c.alignment=al();c.border=bd()
     return c
 
-def calc(ws, row, col, formula=None):
-    c = ws.cell(row=row, column=col)
-    if formula is not None:
-        c.value = formula
-    c.fill = fill(C["CALC_BG"])
-    c.font = font(C["CALC_FG"])
-    c.alignment = center()
-    c.border = thin_border()
+def calc(ws,row,col,formula=None):
+    c=ws.cell(row=row,column=col)
+    if formula is not None: c.value=formula
+    c.fill=fl(C["CALC_BG"]);c.font=fn(C["CALC_FG"])
+    c.alignment=al();c.border=bd()
     return c
 
-def step(ws, row, col, formula=None):
-    c = ws.cell(row=row, column=col)
-    if formula is not None:
-        c.value = formula
-    c.fill = fill(C["STEP_BG"])
-    c.font = font(C["STEP_FG"])
-    c.alignment = center()
-    c.border = thin_border()
+def step(ws,row,col,formula=None):
+    c=ws.cell(row=row,column=col)
+    if formula is not None: c.value=formula
+    c.fill=fl(C["STEP_BG"]);c.font=fn(C["STEP_FG"])
+    c.alignment=al();c.border=bd()
     return c
 
-def ref_cell(ws, row, col, formula=None):
-    c = ws.cell(row=row, column=col)
-    if formula is not None:
-        c.value = formula
-    c.fill = fill(C["REF_BG"])
-    c.font = font(C["REF_FG"])
-    c.alignment = center()
-    c.border = thin_border()
+def ref(ws,row,col,formula=None):
+    c=ws.cell(row=row,column=col)
+    if formula is not None: c.value=formula
+    c.fill=fl(C["REF_BG"]);c.font=fn(C["REF_FG"])
+    c.alignment=al("left");c.border=bd()
     return c
 
-def cr(row, col):
-    """Return absolute cell address string e.g. $B$5"""
-    return f"${get_column_letter(col)}${row}"
+def cr(row,col): return f"${get_column_letter(col)}${row}"
+def ad(row,col): return f"{get_column_letter(col)}{row}"
 
-def addr(row, col):
-    return f"{get_column_letter(col)}{row}"
-
-# ── Workbook setup ─────────────────────────────────────────────────────────────
+# ── Workbook ───────────────────────────────────────────────────────────────────
 wb = Workbook()
 ws = wb.active
 ws.title = "SX Model"
 ws.sheet_properties.tabColor = C["TITLE"]
 
-ELEMENTS = ["U", "Th", "Hf", "Zr"]
-N_STAGES = 25
+# Default column width
+for col in range(1,600):
+    ws.column_dimensions[get_column_letter(col)].width = 11
+ws.column_dimensions["A"].width = 20
 
-# Column widths
-for col in range(1, 120):
-    ws.column_dimensions[get_column_letter(col)].width = 13
-ws.column_dimensions["A"].width = 18
-ws.column_dimensions["B"].width = 16
+# ──────────────────────────────────────────────────────────────────────────────
+# ROW 1  Title
+# ──────────────────────────────────────────────────────────────────────────────
+ws.row_dimensions[1].height = 28
+ws.merge_cells("A1:BZ1")
+c=ws["A1"]
+c.value=("STEADY-STATE SX SIMULATION — Primene JMT / H₂SO₄ Loading / HNO₃ Stripping — "
+         "26 Elements: Al Sc Fe Co Zn Ga Rb Y Zr La Ce Pr Nd Sm Eu Gd Tb Dy Ho Er Tm Yb Lu Hf Th U")
+c.fill=fl(C["TITLE"]); c.font=fn("FFFFFF",bold=True,sz=13); c.alignment=al()
 
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-# ROW 1 — Main title banner
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-ws.row_dimensions[1].height = 30
-ws.merge_cells("A1:AZ1")
-c = ws["A1"]
-c.value = "STEADY-STATE SX SIMULATION — Primene JMT / H₂SO₄ Loading / HNO₃ Stripping — U, Th, Hf, Zr"
-c.fill = fill(C["TITLE"])
-c.font = Font(color="FFFFFF", bold=True, size=14, name="Calibri")
-c.alignment = center()
+# ROW 2  Legend
+ws.row_dimensions[2].height = 16
+legend=[("INPUT","FFFDE7",C["INPUT_FG"]),("CALC","FFFFFF",C["CALC_FG"]),
+        ("STEP","E8EAF6",C["STEP_FG"]),("OUTPUT","F1F8E9",C["OUT_FG"]),
+        ("REF","E3F2FD",C["REF_FG"])]
+col=1
+for lbl,bg,fg in legend:
+    ws.merge_cells(start_row=2,start_column=col,end_row=2,end_column=col+2)
+    c=ws.cell(row=2,column=col,value=lbl)
+    c.fill=fl(bg);c.font=fn(fg,bold=True,sz=9);c.alignment=al()
+    col+=3
 
-# ROW 2 — Legend
-ws.row_dimensions[2].height = 18
-legend = [
-    ("INPUT (yellow)", "FFFDE7", C["INPUT_FG"]),
-    ("CALC (white)", "FFFFFF", C["CALC_FG"]),
-    ("STEP (blue-grey)", "E8EAF6", C["STEP_FG"]),
-    ("OUTPUT (mint)", "F1F8E9", C["OUTPUT_FG"]),
-    ("REF (light blue)", "E3F2FD", C["REF_FG"]),
-]
-col = 1
-for label, bg, fg in legend:
-    ws.merge_cells(start_row=2, start_column=col, end_row=2, end_column=col+3)
-    c = ws.cell(row=2, column=col, value=label)
-    c.fill = fill(bg)
-    c.font = font(fg, bold=True, sz=9)
-    c.alignment = center()
-    col += 4
+ws.row_dimensions[3].height=5
 
-# ROW 3 — spacer
-ws.row_dimensions[3].height = 6
-
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-# SECTION 0 — P/Q REGRESSION  (rows 4–55)
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# ══════════════════════════════════════════════════════════════════════════════
+# SECTION 0 — REGRESSION  (rows 4+)
+# Layout of each panel (Loading / Stripping):
+#   col 1          : Stage
+#   col 2          : [acid] N
+#   col 3          : Flow_aq
+#   col 4          : Flow_org
+#   cols 5 to 5+N_EL-1  : C_aq per element
+#   cols 5+N_EL to 5+2*N_EL-1 : C_org per element
+# Panel width = 4 + 2*N_EL
+# ══════════════════════════════════════════════════════════════════════════════
 REG_START = 4
+PANEL_W = 4 + 2*N_EL          # 4 + 52 = 56
 
-# Section header
-ws.row_dimensions[REG_START].height = 20
-ws.merge_cells(f"A{REG_START}:Z{REG_START}")
-c = ws.cell(row=REG_START, column=1,
-            value="SECTION 0 — P/Q REGRESSION  (D = P × [acid]^Q  via log-log linear regression)")
-c.fill = fill(C["SECHDR"])
-c.font = font("FFFFFF", bold=True, sz=12)
-c.alignment = center()
+LOAD_COL  = 1
+STRIP_COL = LOAD_COL + PANEL_W + 1   # 58
 
-# Sub-panel headers
-# Left panel: LOADING (H2SO4), Right panel: STRIPPING (HNO3)
-# LOADING starts col 1, STRIPPING starts col 14
-LOAD_COL = 1
-STRIP_COL = 14
+ws.row_dimensions[REG_START].height=20
+ws.merge_cells(f"A{REG_START}:{get_column_letter(STRIP_COL+PANEL_W)}{REG_START}")
+c=ws.cell(row=REG_START,column=1,
+          value="SECTION 0 — P/Q REGRESSION  (D = P × [acid]^Q  via log-log linear regression)")
+c.fill=fl(C["SECHDR"]);c.font=fn("FFFFFF",bold=True,sz=11);c.alignment=al()
 
-PANEL_COLS = ["Stage", "[acid] N", "Flow_aq\n(mL/min)", "Flow_org\n(mL/min)",
-              "U_aq\n(ppm)", "Th_aq\n(ppm)", "Hf_aq\n(ppm)", "Zr_aq\n(ppm)",
-              "U_org\n(ppm)", "Th_org\n(ppm)", "Hf_org\n(ppm)", "Zr_org\n(ppm)"]
+STAGE_LBLS_L = ["L1","L2","L3"]
+STAGE_LBLS_S = ["S1","S2","S3"]
+N_STAGES_REG = 3
 
-STAGE_LABELS_LOAD = ["L1", "L2", "L3"]
-STAGE_LABELS_STRIP = ["S1", "S2", "S3"]
+def build_panel_header(ws, base_row, base_col, title, bg_title):
+    """Build 3-row header for a regression input panel."""
+    ws.row_dimensions[base_row].height=16
+    hdr(ws, base_row, base_col, title, span=PANEL_W, bg=bg_title, fg=C["SECHDR"], sz=10)
+    ws.row_dimensions[base_row+1].height=30
+    hdr(ws,base_row+1,base_col,   "Stage")
+    hdr(ws,base_row+1,base_col+1, "[acid]\nN")
+    hdr(ws,base_row+1,base_col+2, "Flow_aq\n(mL/min)")
+    hdr(ws,base_row+1,base_col+3, "Flow_org\n(mL/min)")
+    for i,e in enumerate(ELEMENTS):
+        hdr(ws,base_row+1,base_col+4+i,     f"{e}_aq\n(ppm)")
+        hdr(ws,base_row+1,base_col+4+N_EL+i,f"{e}_org\n(ppm)")
 
-# Panel sub-headers row
-phdr_row = REG_START + 1
-ws.row_dimensions[phdr_row].height = 18
-ws.merge_cells(start_row=phdr_row, start_column=LOAD_COL,
-               end_row=phdr_row, end_column=LOAD_COL+11)
-hdr(ws, phdr_row, LOAD_COL, "LOADING DATA  (H₂SO₄ system)", span=12,
-    bg=C["EXT_TINT"], fg=C["SECHDR"])
+build_panel_header(ws, REG_START+1, LOAD_COL,  "LOADING DATA  (H₂SO₄ system)", C["EXT_T"])
+build_panel_header(ws, REG_START+1, STRIP_COL, "STRIPPING DATA  (HNO₃ system)", C["STR_T"])
 
-ws.merge_cells(start_row=phdr_row, start_column=STRIP_COL,
-               end_row=phdr_row, end_column=STRIP_COL+11)
-hdr(ws, phdr_row, STRIP_COL, "STRIPPING DATA  (HNO₃ system)", span=12,
-    bg=C["STR_TINT"], fg=C["SECHDR"])
+# Input data rows
+INP_ROW_BASE = REG_START + 3   # first data row = row 7
+for i,(ll,sl) in enumerate(zip(STAGE_LBLS_L, STAGE_LBLS_S)):
+    r = INP_ROW_BASE + i
+    ws.row_dimensions[r].height=15
+    sc(ws,r,LOAD_COL, C["STEP_BG"],C["STEP_FG"],val=ll)
+    sc(ws,r,STRIP_COL,C["STEP_BG"],C["STEP_FG"],val=sl)
+    for c_off in range(1, PANEL_W):
+        inp(ws,r,LOAD_COL +c_off)
+        inp(ws,r,STRIP_COL+c_off)
 
-col_hdr_row = REG_START + 2
-ws.row_dimensions[col_hdr_row].height = 34
-for i, label in enumerate(PANEL_COLS):
-    hdr(ws, col_hdr_row, LOAD_COL+i, label)
-    hdr(ws, col_hdr_row, STRIP_COL+i, label)
+# ── Calculated D values ────────────────────────────────────────────────────────
+D_HDR_ROW = INP_ROW_BASE + N_STAGES_REG + 1  # row 11
+D_PANEL_W = 1 + N_EL   # stage + N_EL D cols
 
-# Data rows: 3 loading stages, 3 strip stages (S3 empty, only 2 used)
-DATA_ROW_START = REG_START + 3  # row 7
-for i, stage_lbl in enumerate(STAGE_LABELS_LOAD):
-    r = DATA_ROW_START + i
-    ws.row_dimensions[r].height = 16
-    style_cell(ws, r, LOAD_COL, C["STEP_BG"], C["STEP_FG"], val=stage_lbl)
-    for c_off in range(1, 12):
-        inp(ws, r, LOAD_COL + c_off)
+ws.row_dimensions[D_HDR_ROW].height=18
+hdr(ws,D_HDR_ROW,LOAD_COL,  "CALCULATED D VALUES  (C_org/C_aq)", span=D_PANEL_W, bg=C["COLHDR"])
+hdr(ws,D_HDR_ROW,STRIP_COL, "CALCULATED D VALUES  (C_org/C_aq)", span=D_PANEL_W, bg=C["COLHDR"])
 
-for i, stage_lbl in enumerate(STAGE_LABELS_STRIP):
-    r = DATA_ROW_START + i
-    style_cell(ws, r, STRIP_COL, C["STEP_BG"], C["STEP_FG"], val=stage_lbl)
-    for c_off in range(1, 12):
-        inp(ws, r, STRIP_COL + c_off)
+D_COL_HDR = D_HDR_ROW+1
+ws.row_dimensions[D_COL_HDR].height=16
+hdr(ws,D_COL_HDR,LOAD_COL,"Stage")
+hdr(ws,D_COL_HDR,STRIP_COL,"Stage")
+for i,e in enumerate(ELEMENTS):
+    hdr(ws,D_COL_HDR,LOAD_COL +1+i,f"D_{e}")
+    hdr(ws,D_COL_HDR,STRIP_COL+1+i,f"D_{e}")
 
-# ── Calculated D values ───────────────────────────────────────────────────────
-D_HDR_ROW = DATA_ROW_START + 3  # row 10
-ws.row_dimensions[D_HDR_ROW].height = 18
-ws.merge_cells(f"A{D_HDR_ROW}:M{D_HDR_ROW}")
-hdr(ws, D_HDR_ROW, 1, "CALCULATED D VALUES  (D = C_org / C_aq)", span=13,
-    bg=C["COLHDR"])
-ws.merge_cells(f"N{D_HDR_ROW}:Z{D_HDR_ROW}")
-hdr(ws, D_HDR_ROW, 14, "CALCULATED D VALUES  (D = C_org / C_aq)", span=13,
-    bg=C["COLHDR"])
+D_DATA_ROW = D_COL_HDR+1  # row 13
+for i,(ll,sl) in enumerate(zip(STAGE_LBLS_L,STAGE_LBLS_S)):
+    r=D_DATA_ROW+i
+    ws.row_dimensions[r].height=15
+    inp_r=INP_ROW_BASE+i
+    sc(ws,r,LOAD_COL, C["STEP_BG"],C["STEP_FG"],val=ll)
+    sc(ws,r,STRIP_COL,C["STEP_BG"],C["STEP_FG"],val=sl)
+    for e_idx in range(N_EL):
+        # Loading
+        aq_c  = LOAD_COL+4+e_idx
+        org_c = LOAD_COL+4+N_EL+e_idx
+        aqa=ad(inp_r,aq_c); orga=ad(inp_r,org_c)
+        calc(ws,r,LOAD_COL+1+e_idx,
+             f'=IFERROR(IF(OR({aqa}="",{orga}="",{aqa}=0),"—",{orga}/{aqa}),"—")')
+        # Stripping
+        aq_c  = STRIP_COL+4+e_idx
+        org_c = STRIP_COL+4+N_EL+e_idx
+        aqa=ad(inp_r,aq_c); orga=ad(inp_r,org_c)
+        calc(ws,r,STRIP_COL+1+e_idx,
+             f'=IFERROR(IF(OR({aqa}="",{orga}="",{aqa}=0),"—",{orga}/{aqa}),"—")')
 
-D_COL_HDR = D_HDR_ROW + 1
-ws.row_dimensions[D_COL_HDR].height = 16
-d_cols = ["Stage", "D_U", "D_Th", "D_Hf", "D_Zr"]
-for i, lbl in enumerate(d_cols):
-    hdr(ws, D_COL_HDR, LOAD_COL+i, lbl)
-    hdr(ws, D_COL_HDR, STRIP_COL+i, lbl)
+# ── Regression summary ─────────────────────────────────────────────────────────
+REG_SUM_ROW = D_DATA_ROW + N_STAGES_REG + 1  # row 17
+ws.row_dimensions[REG_SUM_ROW].height=18
+hdr(ws,REG_SUM_ROW,1,
+    "LOG-LOG REGRESSION SUMMARY  (D = P × [acid]^Q)  — OUTPUT cells feed TDMA Panel B",
+    span=7*N_EL, bg=C["SECHDR"], sz=10)
 
-# D data rows (Load)
-D_DATA_START = D_COL_HDR + 1  # row 12
-# Column mapping for input table: col offset 4=U_aq,5=Th,6=Hf,7=Zr (aq), 8=U_org...
-for i in range(3):
-    r = D_DATA_START + i
-    ws.row_dimensions[r].height = 16
-    inp_r = DATA_ROW_START + i
-    style_cell(ws, r, LOAD_COL, C["STEP_BG"], C["STEP_FG"],
-               val=STAGE_LABELS_LOAD[i])
-    # D for each element
-    for e_idx, e in enumerate(ELEMENTS):
-        aq_col = LOAD_COL + 4 + e_idx   # U_aq=col5, Th=6, Hf=7, Zr=8
-        org_col = LOAD_COL + 8 + e_idx  # U_org=col9, Th=10, Hf=11, Zr=12
-        aq_addr = addr(inp_r, aq_col)
-        org_addr = addr(inp_r, org_col)
-        formula = (f'=IFERROR(IF(OR({aq_addr}="",{org_addr}=""),"—",'
-                   f'{org_addr}/{aq_addr}),"—")')
-        calc(ws, r, LOAD_COL+1+e_idx, formula)
+RS_COL_HDR = REG_SUM_ROW+1
+ws.row_dimensions[RS_COL_HDR].height=30
+reg_labels=["Element","P_loading","Q_loading","R²_load","P_strip","Q_strip","R²_strip"]
+for i,lbl in enumerate(reg_labels):
+    hdr(ws,RS_COL_HDR,1+i,lbl)
 
-    style_cell(ws, r, STRIP_COL, C["STEP_BG"], C["STEP_FG"],
-               val=STAGE_LABELS_STRIP[i])
-    for e_idx, e in enumerate(ELEMENTS):
-        aq_col = STRIP_COL + 4 + e_idx
-        org_col = STRIP_COL + 8 + e_idx
-        aq_addr = addr(inp_r, aq_col)
-        org_addr = addr(inp_r, org_col)
-        formula = (f'=IFERROR(IF(OR({aq_addr}="",{org_addr}=""),"—",'
-                   f'{org_addr}/{aq_addr}),"—")')
-        calc(ws, r, STRIP_COL+1+e_idx, formula)
+# acid N column: LOAD col 2, rows INP_ROW_BASE to INP_ROW_BASE+2
+load_acid_range = f"{ad(INP_ROW_BASE,LOAD_COL+1)}:{ad(INP_ROW_BASE+2,LOAD_COL+1)}"
+strip_acid_range= f"{ad(INP_ROW_BASE,STRIP_COL+1)}:{ad(INP_ROW_BASE+2,STRIP_COL+1)}"
 
-# ── Log-log regression ────────────────────────────────────────────────────────
-REG_SUM_ROW = D_DATA_START + 3 + 1  # row 17
-ws.row_dimensions[REG_SUM_ROW].height = 18
-ws.merge_cells(f"A{REG_SUM_ROW}:Z{REG_SUM_ROW}")
-hdr(ws, REG_SUM_ROW, 1,
-    "LOG-LOG REGRESSION SUMMARY  (D = P × [acid]^Q  →  feeds TDMA Panel B)",
-    span=26, bg=C["SECHDR"])
+REG_CELLS = {}   # element -> dict of (row,col) for P_load,Q_load,P_strip,Q_strip
+RS_DATA_ROW = RS_COL_HDR+1  # row 19
 
-REG_COL_HDR = REG_SUM_ROW + 1
-ws.row_dimensions[REG_COL_HDR].height = 34
-reg_cols = ["Element", "P_loading", "Q_loading", "R²_loading",
-            "P_strip", "Q_strip", "R²_strip"]
-for i, lbl in enumerate(reg_cols):
-    hdr(ws, REG_COL_HDR, LOAD_COL+i, lbl)
+def rq(d_range, acid_range):
+    return (f'=IFERROR(IF(COUNTA({d_range})<2,"Need≥2",'
+            f'SLOPE(LN(IF(ISNUMBER({d_range}),{d_range},1)),'
+            f'LN(IF(ISNUMBER({acid_range}),{acid_range},1)))),"N/A")')
 
-# Regression data rows — one per element
-REG_DATA_START = REG_COL_HDR + 1  # row 19
-# D value cell addresses (loading): rows D_DATA_START to D_DATA_START+2, cols 2-5
-# acid N: DATA_ROW_START to +2, col 2 (LOAD_COL+1)
+def rp(d_range, acid_range):
+    return (f'=IFERROR(IF(COUNTA({d_range})<2,"Need≥2",'
+            f'EXP(INTERCEPT(LN(IF(ISNUMBER({d_range}),{d_range},1)),'
+            f'LN(IF(ISNUMBER({acid_range}),{acid_range},1))))),"N/A")')
 
-# Build ranges
-load_acid_range = (f"{addr(DATA_ROW_START, LOAD_COL+1)}:"
-                   f"{addr(DATA_ROW_START+2, LOAD_COL+1)}")
-strip_acid_range = (f"{addr(DATA_ROW_START, STRIP_COL+1)}:"
-                    f"{addr(DATA_ROW_START+2, STRIP_COL+1)}")
+def rr2(d_range, acid_range):
+    return (f'=IFERROR(IF(COUNTA({d_range})<2,"Need≥2",'
+            f'RSQ(LN(IF(ISNUMBER({d_range}),{d_range},1)),'
+            f'LN(IF(ISNUMBER({acid_range}),{acid_range},1)))),"N/A")')
 
-# We store regression cell addresses for later linking to TDMA Panel B
-REG_CELLS = {}  # element -> {P_load, Q_load, P_strip, Q_strip}
+for e_idx,elem in enumerate(ELEMENTS):
+    r = RS_DATA_ROW + e_idx
+    ws.row_dimensions[r].height=15
+    sc(ws,r,1,C["STEP_BG"],C["STEP_FG"],val=elem)
 
-for e_idx, elem in enumerate(ELEMENTS):
-    r = REG_DATA_START + e_idx
-    ws.row_dimensions[r].height = 16
-    style_cell(ws, r, 1, C["STEP_BG"], C["STEP_FG"], val=elem)
+    ld_col = LOAD_COL+1+e_idx   # D column in D table
+    st_col = STRIP_COL+1+e_idx
+    ld_d_range = f"{ad(D_DATA_ROW,ld_col)}:{ad(D_DATA_ROW+2,ld_col)}"
+    st_d_range = f"{ad(D_DATA_ROW,st_col)}:{ad(D_DATA_ROW+2,st_col)}"
 
-    load_d_col = LOAD_COL + 1 + e_idx   # D_U is col2, etc.
-    strip_d_col = STRIP_COL + 1 + e_idx
+    out(ws,r,2, rp(ld_d_range, load_acid_range))
+    out(ws,r,3, rq(ld_d_range, load_acid_range))
+    calc(ws,r,4,rr2(ld_d_range, load_acid_range))
+    out(ws,r,5, rp(st_d_range, strip_acid_range))
+    out(ws,r,6, rq(st_d_range, strip_acid_range))
+    calc(ws,r,7,rr2(st_d_range, strip_acid_range))
 
-    load_d_range = (f"{addr(D_DATA_START, load_d_col)}:"
-                    f"{addr(D_DATA_START+2, load_d_col)}")
-    strip_d_range = (f"{addr(D_DATA_START, strip_d_col)}:"
-                     f"{addr(D_DATA_START+2, strip_d_col)}")
+    REG_CELLS[elem]={"P_load":(r,2),"Q_load":(r,3),
+                     "P_strip":(r,5),"Q_strip":(r,6)}
 
-    # LN arrays for SLOPE/INTERCEPT: We need numeric only.
-    # Since D might be "—", use IFERROR with VALUE... but in Excel arrays
-    # we rely on IF checks. We'll use helper approach with IFERROR on SLOPE.
-    def reg_formula_Q(d_range, acid_range):
-        return (f'=IFERROR(IF(COUNTA({d_range})<2,"Need ≥2 pts",'
-                f'SLOPE(LN(IF({d_range}<>"—",IF(ISNUMBER({d_range}),{d_range},1),1)),'
-                f'LN(IF({acid_range}<>"",{acid_range},1)))),"N/A")')
+# ══════════════════════════════════════════════════════════════════════════════
+# TDMA INPUT PANELS  (start after regression + spacer)
+# ══════════════════════════════════════════════════════════════════════════════
+TDMA_START = RS_DATA_ROW + N_EL + 2   # row ~47
 
-    def reg_formula_P(d_range, acid_range):
-        return (f'=IFERROR(IF(COUNTA({d_range})<2,"Need ≥2 pts",'
-                f'EXP(INTERCEPT(LN(IF({d_range}<>"—",IF(ISNUMBER({d_range}),{d_range},1),1)),'
-                f'LN(IF({acid_range}<>"",{acid_range},1))))),"N/A")')
+ws.row_dimensions[TDMA_START].height=20
+ws.merge_cells(f"A{TDMA_START}:{get_column_letter(30)}{TDMA_START}")
+c=ws.cell(row=TDMA_START,column=1,value="TDMA SOLVER — INPUT PANELS")
+c.fill=fl(C["TITLE"]);c.font=fn("FFFFFF",bold=True,sz=12);c.alignment=al()
 
-    def reg_formula_R2(d_range, acid_range):
-        return (f'=IFERROR(IF(COUNTA({d_range})<2,"Need ≥2 pts",'
-                f'RSQ(LN(IF({d_range}<>"—",IF(ISNUMBER({d_range}),{d_range},1),1)),'
-                f'LN(IF({acid_range}<>"",{acid_range},1)))),"N/A")')
-
-    # P_loading (col 2)
-    P_load_cell = out(ws, r, 2)
-    P_load_cell.value = reg_formula_P(load_d_range, load_acid_range)
-
-    # Q_loading (col 3)
-    Q_load_cell = out(ws, r, 3)
-    Q_load_cell.value = reg_formula_Q(load_d_range, load_acid_range)
-
-    # R2_loading (col 4)
-    R2_load = calc(ws, r, 4)
-    R2_load.value = reg_formula_R2(load_d_range, load_acid_range)
-
-    # P_strip (col 5)
-    P_strip_cell = out(ws, r, 5)
-    P_strip_cell.value = reg_formula_P(strip_d_range, strip_acid_range)
-
-    # Q_strip (col 6)
-    Q_strip_cell = out(ws, r, 6)
-    Q_strip_cell.value = reg_formula_Q(strip_d_range, strip_acid_range)
-
-    # R2_strip (col 7)
-    R2_strip = calc(ws, r, 7)
-    R2_strip.value = reg_formula_R2(strip_d_range, strip_acid_range)
-
-    REG_CELLS[elem] = {
-        "P_load": (r, 2),
-        "Q_load": (r, 3),
-        "P_strip": (r, 5),
-        "Q_strip": (r, 6),
-    }
-
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-# TDMA INPUT PANELS  (rows 57–68)
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-TDMA_START = 57
-ws.row_dimensions[TDMA_START].height = 20
-ws.merge_cells(f"A{TDMA_START}:AZ{TDMA_START}")
-c = ws.cell(row=TDMA_START, column=1,
-            value="TDMA SOLVER — INPUT PANELS")
-c.fill = fill(C["TITLE"])
-c.font = font("FFFFFF", bold=True, sz=12)
-c.alignment = center()
-
-# Panel A — General Inputs (cols A-B = 1-2)
-PA_ROW = TDMA_START + 1
-ws.row_dimensions[PA_ROW].height = 16
+# Panel A — cols 1-2
+PA_ROW = TDMA_START+1
 ws.merge_cells(f"A{PA_ROW}:B{PA_ROW}")
-hdr(ws, PA_ROW, 1, "PANEL A — General Inputs", span=2, bg=C["SECHDR"])
+hdr(ws,PA_ROW,1,"PANEL A — General Inputs",span=2,bg=C["SECHDR"])
 
-panel_a = [
-    ("n_ext (extraction stages)", 3),
-    ("n_scr (scrub stages)", 0),
-    ("n_str (strip stages)", 2),
-    ("[H₂SO₄] Extraction (N)", 0.5),
-    ("[H₂SO₄] Scrub (N)", 1.0),
-    ("[HNO₃] Strip (N)", 4.0),
-    ("F — Feed flow aq (L/min)", 1.0),
-    ("S — Strip flow aq (L/min)", 1.0),
-    ("O — Org flow (L/min)", 1.0),
-    ("R — Recycle ratio", 0.0),
+panel_a=[
+    ("n_ext (extraction stages)",3),
+    ("n_scr (scrub stages)",0),
+    ("n_str (strip stages)",2),
+    ("[H₂SO₄] Extraction (N)",0.5),
+    ("[H₂SO₄] Scrub (N)",1.0),
+    ("[HNO₃] Strip (N)",4.0),
+    ("F — Feed flow aq (L/min)",1.0),
+    ("S — Strip flow aq (L/min)",1.0),
+    ("O — Org flow (L/min)",1.0),
+    ("R — Recycle ratio",0.0),
 ]
+PA_DATA = PA_ROW+1
+PA_CELLS={}
+for i,(lbl,val) in enumerate(panel_a):
+    r=PA_DATA+i
+    ws.row_dimensions[r].height=15
+    ref(ws,r,1,lbl)
+    inp(ws,r,2,val)
+    PA_CELLS[lbl]=(r,2)
 
-# Absolute cell references for Panel A inputs
-PA_DATA_START = PA_ROW + 1
-PA_CELLS = {}  # key -> (row, col=2)
-for i, (label, default) in enumerate(panel_a):
-    r = PA_DATA_START + i
-    ws.row_dimensions[r].height = 16
-    style_cell(ws, r, 1, C["REF_BG"], C["REF_FG"], val=label, align="left")
-    inp(ws, r, 2, default)
-    PA_CELLS[label] = (r, 2)
+def pa(key): r,c=PA_CELLS[key]; return cr(r,c)
+N_EXT_REF  = pa("n_ext (extraction stages)")
+N_SCR_REF  = pa("n_scr (scrub stages)")
+N_STR_REF  = pa("n_str (strip stages)")
+AE_REF     = pa("[H₂SO₄] Extraction (N)")
+AS_REF     = pa("[H₂SO₄] Scrub (N)")
+AN_REF     = pa("[HNO₃] Strip (N)")
+F_REF      = pa("F — Feed flow aq (L/min)")
+S_REF      = pa("S — Strip flow aq (L/min)")
+O_REF      = pa("O — Org flow (L/min)")
+R_REF      = pa("R — Recycle ratio")
 
-# Shorthand absolute refs
-def pa(key):
-    r, c_ = PA_CELLS[key]
-    return cr(r, c_)
+# Panel B — Distribution Coefficients (cols 4-8)
+PB_COL=4
+PB_ROW=TDMA_START+1
+ws.merge_cells(start_row=PB_ROW,start_column=PB_COL,
+               end_row=PB_ROW,end_column=PB_COL+5)
+hdr(ws,PB_ROW,PB_COL,"PANEL B — Distribution Coefficients (live-linked from Regression)",
+    span=6,bg=C["SECHDR"])
+for i,lbl in enumerate(["Element","P_load","Q_load","P_strip","Q_strip","Note"]):
+    hdr(ws,PB_ROW+1,PB_COL+i,lbl)
 
-N_EXT_REF = pa("n_ext (extraction stages)")
-N_SCR_REF = pa("n_scr (scrub stages)")
-N_STR_REF = pa("n_str (strip stages)")
-ACID_EXT_REF = pa("[H₂SO₄] Extraction (N)")
-ACID_SCR_REF = pa("[H₂SO₄] Scrub (N)")
-ACID_STR_REF = pa("[HNO₃] Strip (N)")
-F_REF = pa("F — Feed flow aq (L/min)")
-S_REF = pa("S — Strip flow aq (L/min)")
-O_REF = pa("O — Org flow (L/min)")
-R_REF = pa("R — Recycle ratio")
-
-# Panel B — Distribution Coefficients (cols F-K = 6-11)
-PB_COL = 6
-PB_ROW = TDMA_START + 1
-ws.merge_cells(start_row=PB_ROW, start_column=PB_COL,
-               end_row=PB_ROW, end_column=PB_COL+5)
-hdr(ws, PB_ROW, PB_COL,
-    "PANEL B — Distribution Coefficients (linked from Regression)",
-    span=6, bg=C["SECHDR"])
-
-pb_col_hdr = PB_ROW + 1
-pb_labels = ["Element", "P_load", "Q_load", "P_strip", "Q_strip", "Note"]
-for i, lbl in enumerate(pb_labels):
-    hdr(ws, pb_col_hdr, PB_COL+i, lbl)
-
-# Defaults in case regression returns N/A
-DEFAULTS = {
-    "U":  {"P_load": 0.80, "Q_load": -1.2, "P_strip": 0.80, "Q_strip": -1.2},
-    "Th": {"P_load": 1.50, "Q_load": -1.5, "P_strip": 1.50, "Q_strip": -1.5},
-    "Hf": {"P_load": 0.30, "Q_load": -0.8, "P_strip": 0.30, "Q_strip": -0.8},
-    "Zr": {"P_load": 2.00, "Q_load": -1.0, "P_strip": 2.00, "Q_strip": -1.0},
-}
-
-PB_CELLS = {}  # element -> {P_load, Q_load, P_strip, Q_strip} absolute refs
-pb_data_start = pb_col_hdr + 1
-for e_idx, elem in enumerate(ELEMENTS):
-    r = pb_data_start + e_idx
-    ws.row_dimensions[r].height = 16
-    style_cell(ws, r, PB_COL, C["STEP_BG"], C["STEP_FG"], val=elem)
-
-    reg = REG_CELLS[elem]
-    defs = DEFAULTS[elem]
-
-    def linked(reg_r, reg_c, default_val):
-        ref = cr(reg_r, reg_c)
-        return (f'=IFERROR(IF(ISNUMBER({ref}),{ref},{default_val}),{default_val})')
-
-    P_load_c = out(ws, r, PB_COL+1)
-    P_load_c.value = linked(*reg["P_load"], defs["P_load"])
-
-    Q_load_c = out(ws, r, PB_COL+2)
-    Q_load_c.value = linked(*reg["Q_load"], defs["Q_load"])
-
-    P_strip_c = out(ws, r, PB_COL+3)
-    P_strip_c.value = linked(*reg["P_strip"], defs["P_strip"])
-
-    Q_strip_c = out(ws, r, PB_COL+4)
-    Q_strip_c.value = linked(*reg["Q_strip"], defs["Q_strip"])
-
-    note_c = ws.cell(row=r, column=PB_COL+5,
-                     value="Live-linked from regression")
-    note_c.fill = fill(C["CALC_BG"])
-    note_c.font = font(C["CALC_FG"], sz=8)
-    note_c.alignment = left()
-
-    PB_CELLS[elem] = {
-        "P_load":  cr(r, PB_COL+1),
-        "Q_load":  cr(r, PB_COL+2),
-        "P_strip": cr(r, PB_COL+3),
-        "Q_strip": cr(r, PB_COL+4),
+PB_CELLS={}
+PB_DATA=PB_ROW+2
+for e_idx,elem in enumerate(ELEMENTS):
+    r=PB_DATA+e_idx
+    ws.row_dimensions[r].height=15
+    sc(ws,r,PB_COL,C["STEP_BG"],C["STEP_FG"],val=elem)
+    reg=REG_CELLS[elem]
+    def linked(rr,cc,defval):
+        ref_=cr(rr,cc)
+        return f'=IFERROR(IF(ISNUMBER({ref_}),{ref_},{defval}),{defval})'
+    out(ws,r,PB_COL+1, linked(*reg["P_load"], P_DEF[elem]))
+    out(ws,r,PB_COL+2, linked(*reg["Q_load"], Q_DEF_LOAD[elem]))
+    out(ws,r,PB_COL+3, linked(*reg["P_strip"],P_DEF[elem]))
+    out(ws,r,PB_COL+4, linked(*reg["Q_strip"],Q_DEF_STRIP[elem]))
+    c_=ws.cell(row=r,column=PB_COL+5,value="→ regression")
+    c_.fill=fl(C["CALC_BG"]);c_.font=fn(C["CALC_FG"],sz=8);c_.alignment=al()
+    PB_CELLS[elem]={
+        "P_load" :cr(r,PB_COL+1), "Q_load" :cr(r,PB_COL+2),
+        "P_strip":cr(r,PB_COL+3), "Q_strip":cr(r,PB_COL+4),
     }
 
-# Panel C — Feed Concentrations (cols M-O = 13-15)
-PC_COL = 13
-PC_ROW = TDMA_START + 1
-ws.merge_cells(start_row=PC_ROW, start_column=PC_COL,
-               end_row=PC_ROW, end_column=PC_COL+2)
-hdr(ws, PC_ROW, PC_COL, "PANEL C — Feed Conc. (g/L)", span=3, bg=C["SECHDR"])
-hdr(ws, PC_ROW+1, PC_COL, "Element")
-hdr(ws, PC_ROW+1, PC_COL+1, "X_feed (g/L)")
-hdr(ws, PC_ROW+1, PC_COL+2, "MW (g/mol)")
+# Panel C — Feed Concentrations (cols 10-12)
+PC_COL=10
+PC_ROW=TDMA_START+1
+ws.merge_cells(start_row=PC_ROW,start_column=PC_COL,
+               end_row=PC_ROW,end_column=PC_COL+2)
+hdr(ws,PC_ROW,PC_COL,"PANEL C — Feed Conc. (g/L)",span=3,bg=C["SECHDR"])
+hdr(ws,PC_ROW+1,PC_COL,"Element")
+hdr(ws,PC_ROW+1,PC_COL+1,"X_feed (g/L)")
+hdr(ws,PC_ROW+1,PC_COL+2,"MW (g/mol)")
 
-FEED_DEFAULTS = {"U": 5.0, "Th": 2.0, "Hf": 0.5, "Zr": 1.0}
-MW = {"U": 238.03, "Th": 232.04, "Hf": 178.49, "Zr": 91.22}
-PC_CELLS = {}
-pc_data_start = PC_ROW + 2
-for e_idx, elem in enumerate(ELEMENTS):
-    r = pc_data_start + e_idx
-    ws.row_dimensions[r].height = 16
-    style_cell(ws, r, PC_COL, C["STEP_BG"], C["STEP_FG"], val=elem)
-    inp(ws, r, PC_COL+1, FEED_DEFAULTS[elem])
-    style_cell(ws, r, PC_COL+2, C["CALC_BG"], C["CALC_FG"], val=MW[elem])
-    PC_CELLS[elem] = {"XF": cr(r, PC_COL+1)}
+PC_CELLS={}
+PC_DATA=PC_ROW+2
+for e_idx,elem in enumerate(ELEMENTS):
+    r=PC_DATA+e_idx
+    ws.row_dimensions[r].height=15
+    sc(ws,r,PC_COL,  C["STEP_BG"],C["STEP_FG"],val=elem)
+    inp(ws,r,PC_COL+1, FEED_DEF[elem])
+    sc(ws,r,PC_COL+2, C["CALC_BG"],C["CALC_FG"],val=MW[elem])
+    PC_CELLS[elem]={"XF":cr(r,PC_COL+1)}
 
-# Panel D — Results Summary (cols Q-R = 17-18)
-PD_COL = 17
-PD_ROW = TDMA_START + 1
+# Panel D — Results (cols 14-16)
+PD_COL=14
+PD_ROW=TDMA_START+1
+ws.merge_cells(start_row=PD_ROW,start_column=PD_COL,
+               end_row=PD_ROW,end_column=PD_COL+1)
+hdr(ws,PD_ROW,PD_COL,"PANEL D — Results Summary",span=2,bg=C["SECHDR"])
+hdr(ws,PD_ROW+1,PD_COL,"Metric")
+hdr(ws,PD_ROW+1,PD_COL+1,"Value (g/L)")
 
-# Panel E — O/A Ratio Tracker (cols T-V = 20-22)
-PE_COL = 20
-PE_ROW = TDMA_START + 1
+# Panel E — O/A Ratios (cols 17-19)
+PE_COL=17
+PE_ROW=TDMA_START+1
+ws.merge_cells(start_row=PE_ROW,start_column=PE_COL,
+               end_row=PE_ROW,end_column=PE_COL+2)
+hdr(ws,PE_ROW,PE_COL,"PANEL E — O/A Ratio Tracker",span=3,bg=C["SECHDR"])
+for i,lbl in enumerate(["Section","O/A","Note"]):
+    hdr(ws,PE_ROW+1,PE_COL+i,lbl)
+pe_data=[("Extraction",f"={O_REF}/{F_REF}","O/F"),
+         ("Scrub",f"={O_REF}/MAX({S_REF}*{R_REF},0.0001)","O/(S·R)"),
+         ("Strip",f"={O_REF}/{S_REF}","O/S")]
+PE_DATA=PE_ROW+2
+for i,(sec,formula,note) in enumerate(pe_data):
+    r=PE_DATA+i
+    ws.row_dimensions[r].height=15
+    sc(ws,r,PE_COL,C["STEP_BG"],C["STEP_FG"],val=sec)
+    out(ws,r,PE_COL+1,formula)
+    sc(ws,r,PE_COL+2,C["CALC_BG"],C["CALC_FG"],val=note)
 
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-# TDMA SOLVER  (rows 70+)
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-SOLVER_START = 80
-ws.row_dimensions[SOLVER_START].height = 20
-ws.merge_cells(f"A{SOLVER_START}:BZ{SOLVER_START}")
-c = ws.cell(row=SOLVER_START, column=1, value="TDMA SOLVER — 25 STAGES")
-c.fill = fill(C["TITLE"])
-c.font = font("FFFFFF", bold=True, sz=12)
-c.alignment = center()
+# ══════════════════════════════════════════════════════════════════════════════
+# TDMA SOLVER  (25 stages × 26 elements)
+# Column layout per element: D a b c d c' d' y_org  =8 cols
+# After all elements: x_aq per element (26 cols), total_org, total_aq
+# ══════════════════════════════════════════════════════════════════════════════
+# Ensure solver starts well below all panels
+PANEL_LAST_ROW = max(TDMA_START+1+len(panel_a)+1,
+                     PB_DATA+N_EL,
+                     PC_DATA+N_EL,
+                     PD_ROW+2+N_EL*3,
+                     PE_DATA+3) + 3
 
-# Column layout:
-# Per element: D, a, b, c, d, cp(c'), dp(d'), y_org  = 8 cols each
-# After 4 elements: x_aq per element = 4 cols
-# Then: total_org, total_aq
-COL_STAGE = 1
-ELEM_BASE = 2  # starts at col 2
+SOLVER_START = PANEL_LAST_ROW
+
+ws.row_dimensions[SOLVER_START].height=20
 COLS_PER_ELEM = 8
-X_AQ_BASE = ELEM_BASE + 4 * COLS_PER_ELEM  # col 34
-TOTAL_ORG_COL = X_AQ_BASE + 4   # col 38
-TOTAL_AQ_COL = TOTAL_ORG_COL + 1  # col 39
+ELEM_BASE = 2   # col B
+X_AQ_BASE = ELEM_BASE + N_EL*COLS_PER_ELEM
+TOT_ORG_COL = X_AQ_BASE + N_EL
+TOT_AQ_COL  = TOT_ORG_COL + 1
 
-ELEM_COLS = {}
-for e_idx, elem in enumerate(ELEMENTS):
-    base = ELEM_BASE + e_idx * COLS_PER_ELEM
-    ELEM_COLS[elem] = {
-        "D": base,
-        "a": base+1,
-        "b": base+2,
-        "c": base+3,
-        "d": base+4,
-        "cp": base+5,
-        "dp": base+6,
-        "y_org": base+7,
+end_solver_col = get_column_letter(TOT_AQ_COL)
+ws.merge_cells(f"A{SOLVER_START}:{end_solver_col}{SOLVER_START}")
+c=ws.cell(row=SOLVER_START,column=1,value="TDMA SOLVER — 25 STAGES × 26 ELEMENTS")
+c.fill=fl(C["TITLE"]);c.font=fn("FFFFFF",bold=True,sz=12);c.alignment=al()
+
+HDR1=SOLVER_START+1
+HDR2=SOLVER_START+2
+ws.row_dimensions[HDR1].height=16; ws.row_dimensions[HDR2].height=28
+
+hdr(ws,HDR1,1,"Stage",bg=C["SECHDR"])
+ws.merge_cells(start_row=HDR1,start_column=1,end_row=HDR2,end_column=1)
+
+ELEM_COLS={}
+for e_idx,elem in enumerate(ELEMENTS):
+    base=ELEM_BASE+e_idx*COLS_PER_ELEM
+    ws.merge_cells(start_row=HDR1,start_column=base,
+                   end_row=HDR1,end_column=base+7)
+    hdr(ws,HDR1,base,f"{elem}",span=8,bg=C["COLHDR"])
+    for i,lbl in enumerate(["D_n","a_n","b_n","c_n","d_n","c'_n","d'_n","y_org"]):
+        hdr(ws,HDR2,base+i,lbl,sz=8)
+    x_col=X_AQ_BASE+e_idx
+    ws.merge_cells(start_row=HDR1,start_column=x_col,
+                   end_row=HDR2,end_column=x_col)
+    hdr(ws,HDR1,x_col,f"x_aq\n{elem}",bg=C["OUT_BG"],fg=C["OUT_FG"],sz=8)
+    ELEM_COLS[elem]={
+        "D":base,"a":base+1,"b":base+2,"c":base+3,
+        "d":base+4,"cp":base+5,"dp":base+6,"y_org":base+7,
+        "x_aq":x_col
     }
-    x_col = X_AQ_BASE + e_idx
-    ELEM_COLS[elem]["x_aq"] = x_col
 
-# Header rows
-HDR1 = SOLVER_START + 1
-HDR2 = SOLVER_START + 2
-ws.row_dimensions[HDR1].height = 16
-ws.row_dimensions[HDR2].height = 16
+ws.merge_cells(start_row=HDR1,start_column=TOT_ORG_COL,
+               end_row=HDR2,end_column=TOT_ORG_COL)
+hdr(ws,HDR1,TOT_ORG_COL,"ΣOrg",sz=8)
+ws.merge_cells(start_row=HDR1,start_column=TOT_AQ_COL,
+               end_row=HDR2,end_column=TOT_AQ_COL)
+hdr(ws,HDR1,TOT_AQ_COL,"ΣAq",sz=8)
 
-# Stage col
-hdr(ws, HDR1, COL_STAGE, "Stage", bg=C["SECHDR"])
-ws.merge_cells(start_row=HDR1, start_column=COL_STAGE,
-               end_row=HDR2, end_column=COL_STAGE)
+STAGE_ROW_START=HDR2+1
 
-for elem in ELEMENTS:
-    ec = ELEM_COLS[elem]
-    base = ec["D"]
-    ws.merge_cells(start_row=HDR1, start_column=base,
-                   end_row=HDR1, end_column=base+7)
-    hdr(ws, HDR1, base, f"{elem}  (8-column TDMA block)", span=8,
-        bg=C["COLHDR"])
-    sub_labels = ["D_n", "a_n", "b_n", "c_n", "d_n", "c'_n", "d'_n", "y_org"]
-    for i, lbl in enumerate(sub_labels):
-        hdr(ws, HDR2, base+i, lbl)
-
-    x_col = ec["x_aq"]
-    ws.merge_cells(start_row=HDR1, start_column=x_col,
-                   end_row=HDR2, end_column=x_col)
-    hdr(ws, HDR1, x_col, f"x_aq\n{elem}", bg=C["OUTPUT_BG"], fg=C["OUTPUT_FG"])
-
-ws.merge_cells(start_row=HDR1, start_column=TOTAL_ORG_COL,
-               end_row=HDR2, end_column=TOTAL_ORG_COL)
-hdr(ws, HDR1, TOTAL_ORG_COL, "Total\nOrg", bg=C["COLHDR"])
-ws.merge_cells(start_row=HDR1, start_column=TOTAL_AQ_COL,
-               end_row=HDR2, end_column=TOTAL_AQ_COL)
-hdr(ws, HDR1, TOTAL_AQ_COL, "Total\nAq", bg=C["COLHDR"])
-
-# Stage data rows
-STAGE_ROW_START = HDR2 + 1  # row 73
-for n in range(1, N_STAGES+1):
-    r = STAGE_ROW_START + n - 1
-    ws.row_dimensions[r].height = 16
-
-    # Stage label with section color
-    # Stage section: extraction if n <= n_ext, scrub if n <= n_ext+n_scr, else strip
-    # We use conditional references; for label just put n
-    lbl_cell = ws.cell(row=r, column=COL_STAGE, value=n)
-    lbl_cell.font = font(C["STEP_FG"], bold=True)
-    lbl_cell.alignment = center()
-    lbl_cell.border = thin_border()
-    # Tint based on position (static since section sizes are user-defined;
-    # we tint by default config: ext=1-3, scr=none, strip=4-5)
-    if n <= 3:
-        lbl_cell.fill = fill(C["EXT_TINT"])
-    elif n <= 5:
-        lbl_cell.fill = fill(C["STR_TINT"])
-    else:
-        lbl_cell.fill = fill(C["CALC_BG"])
+# ── Stage data rows ─────────────────────────────────────────────────────────
+for n in range(1,N_STAGES+1):
+    r=STAGE_ROW_START+n-1
+    ws.row_dimensions[r].height=14
+    lbl_c=ws.cell(row=r,column=1,value=n)
+    lbl_c.font=fn(C["STEP_FG"],bold=True,sz=9)
+    lbl_c.alignment=al()
+    lbl_c.border=bd()
+    if n<=3:   lbl_c.fill=fl(C["EXT_T"])
+    elif n<=5: lbl_c.fill=fl(C["STR_T"])
+    else:      lbl_c.fill=fl(C["CALC_BG"])
 
     for elem in ELEMENTS:
-        ec = ELEM_COLS[elem]
-        pb = PB_CELLS[elem]
+        ec=ELEM_COLS[elem]
+        pb=PB_CELLS[elem]
+        D_a=ad(r,ec["D"]); b_a=ad(r,ec["b"])
+        c_a=ad(r,ec["c"]); d_a=ad(r,ec["d"])
+        cp_a=ad(r,ec["cp"]); dp_a=ad(r,ec["dp"])
 
-        # Cell addresses for this row
-        D_cell_addr = addr(r, ec["D"])
-        a_addr = addr(r, ec["a"])
-        b_addr = addr(r, ec["b"])
-        c_addr = addr(r, ec["c"])
-        d_addr = addr(r, ec["d"])
-        cp_addr = addr(r, ec["cp"])
-        dp_addr = addr(r, ec["dp"])
-        y_addr = addr(r, ec["y_org"])
+        # D_n: branch on section
+        d_f=(f'=IF({n}>{N_EXT_REF}+{N_SCR_REF},'
+             f'{pb["P_strip"]}*{AN_REF}^{pb["Q_strip"]},'
+             f'{pb["P_load"]}*{AE_REF}^{pb["Q_load"]})')
+        step(ws,r,ec["D"],d_f)
 
-        # ── D_n ──
-        # IF strip stage: use P_strip, Q_strip, [HNO3]; else P_load, Q_load, [H2SO4]
-        # Strip stage: n > n_ext + n_scr
-        # n_ext + n_scr is the last extraction/scrub stage
-        d_formula = (
-            f'=IF({n}>{N_EXT_REF}+{N_SCR_REF},'
-            f'{pb["P_strip"]}*{ACID_STR_REF}^{pb["Q_strip"]},'
-            f'{pb["P_load"]}*{ACID_EXT_REF}^{pb["Q_load"]})'
-        )
-        step(ws, r, ec["D"], d_formula)
+        # a_n
+        step(ws,r,ec["a"],f'=IF({n}=1,0,{O_REF})')
 
-        # ── a_n = O; a_1 = 0 ──
-        a_formula = f'=IF({n}=1,0,{O_REF})'
-        step(ws, r, ec["a"], a_formula)
+        # b_n
+        Qaq=(f'IF({n}<={N_EXT_REF},{S_REF}*{R_REF}+{F_REF},'
+             f'IF({n}<={N_EXT_REF}+{N_SCR_REF},{S_REF}*{R_REF},{S_REF}))')
+        step(ws,r,ec["b"],f'=-({O_REF}+({Qaq})/{D_a})')
 
-        # ── b_n = -(O + Q_aq/D_n) ──
-        # Q_aq:
-        #   extraction: Q_aq = S*R + F   (=S*R+F)
-        #   scrub:      Q_aq = S*R
-        #   strip:      Q_aq = S
-        # SR = S*R
-        Q_aq = (
-            f'IF({n}<={N_EXT_REF},{S_REF}*{R_REF}+{F_REF},'
-            f'IF({n}<={N_EXT_REF}+{N_SCR_REF},{S_REF}*{R_REF},{S_REF}))'
-        )
-        b_formula = f'=-({O_REF}+({Q_aq})/{D_cell_addr})'
-        step(ws, r, ec["b"], b_formula)
-
-        # ── c_n ──
-        # n > n_ext+n_scr AND n != N  →  S/D_{n+1}
-        # n = N (=25)                 →  0  (boundary)
-        # n = n_ext+n_scr (last scrub) →  0  (boundary)
-        # scrub (n_ext <= n < n_ext+n_scr) → SR/D_{n+1}
-        # extraction (n < n_ext)           → (SR+F)/D_{n+1}
-        if n < N_STAGES:
-            D_next_addr = addr(r+1, ec["D"])
-            c_formula = (
-                f'=IF({n}={N_EXT_REF}+{N_SCR_REF},0,'
-                f'IF({n}>{N_EXT_REF}+{N_SCR_REF},{S_REF}/{D_next_addr},'
-                f'IF({n}>={N_EXT_REF},{S_REF}*{R_REF}/{D_next_addr},'
-                f'({S_REF}*{R_REF}+{F_REF})/{D_next_addr})))'
-            )
+        # c_n
+        if n<N_STAGES:
+            D_next=ad(r+1,ec["D"])
+            c_f=(f'=IF({n}={N_EXT_REF}+{N_SCR_REF},0,'
+                 f'IF({n}>{N_EXT_REF}+{N_SCR_REF},{S_REF}/{D_next},'
+                 f'IF({n}>={N_EXT_REF},{S_REF}*{R_REF}/{D_next},'
+                 f'({S_REF}*{R_REF}+{F_REF})/{D_next})))')
         else:
-            c_formula = '=0'
-        step(ws, r, ec["c"], c_formula)
+            c_f='=0'
+        step(ws,r,ec["c"],c_f)
 
-        # ── d_n = -XF*F at n=n_ext; else 0 ──
-        XF = PC_CELLS[elem]["XF"]
-        d_formula_coeff = (
-            f'=IF({n}={N_EXT_REF},-{XF}*{F_REF},0)'
-        )
-        step(ws, r, ec["d"], d_formula_coeff)
+        # d_n
+        XF=PC_CELLS[elem]["XF"]
+        step(ws,r,ec["d"],f'=IF({n}={N_EXT_REF},-{XF}*{F_REF},0)')
 
-        # ── Forward sweep ──
-        # Row 1 (n=1):
-        #   c'_1 = c_1 / b_1
-        #   d'_1 = d_1 / b_1
-        # Row n>1:
-        #   c'_n = c_n / (b_n - a_n * c'_{n-1})
-        #   d'_n = (d_n - a_n * d'_{n-1}) / (b_n - a_n * c'_{n-1})
-        if n == 1:
-            cp_formula = f'={c_addr}/{b_addr}'
-            dp_formula = f'={d_addr}/{b_addr}'
+        # Forward sweep
+        if n==1:
+            step(ws,r,ec["cp"],f'={c_a}/{b_a}')
+            step(ws,r,ec["dp"],f'={d_a}/{b_a}')
         else:
-            prev_cp = addr(r-1, ec["cp"])
-            prev_dp = addr(r-1, ec["dp"])
-            denom = f'({b_addr}-{a_addr}*{prev_cp})'
-            cp_formula = f'={c_addr}/{denom}'
-            dp_formula = f'=({d_addr}-{a_addr}*{prev_dp})/{denom}'
-        step(ws, r, ec["cp"], cp_formula)
-        step(ws, r, ec["dp"], dp_formula)
+            pcp=ad(r-1,ec["cp"]); pdp=ad(r-1,ec["dp"])
+            denom=f'({b_a}-{ad(r,ec["a"])}*{pcp})'
+            step(ws,r,ec["cp"],f'={c_a}/{denom}')
+            step(ws,r,ec["dp"],f'=({d_a}-{ad(r,ec["a"])}*{pdp})/{denom}')
 
-# ── Back substitution (y_org) — must do in reverse order ──
-for n in range(N_STAGES, 0, -1):
-    r = STAGE_ROW_START + n - 1
+# Back substitution (must go in reverse)
+for n in range(N_STAGES,0,-1):
+    r=STAGE_ROW_START+n-1
     for elem in ELEMENTS:
-        ec = ELEM_COLS[elem]
-        cp_addr = addr(r, ec["cp"])
-        dp_addr = addr(r, ec["dp"])
-        y_addr = addr(r, ec["y_org"])
-
-        if n == N_STAGES:
-            y_formula = f'={dp_addr}'
+        ec=ELEM_COLS[elem]
+        if n==N_STAGES:
+            out(ws,r,ec["y_org"],f'={ad(r,ec["dp"])}')
         else:
-            y_next = addr(r+1, ec["y_org"])
-            y_formula = f'={dp_addr}-{cp_addr}*{y_next}'
-        out(ws, r, ec["y_org"], y_formula)
+            out(ws,r,ec["y_org"],
+                f'={ad(r,ec["dp"])}-{ad(r,ec["cp"])}*{ad(r+1,ec["y_org"])}')
 
-# ── x_aq and totals ──
-for n in range(1, N_STAGES+1):
-    r = STAGE_ROW_START + n - 1
-    total_org = []
-    total_aq = []
+# x_aq and totals
+for n in range(1,N_STAGES+1):
+    r=STAGE_ROW_START+n-1
+    y_parts=[]; x_parts=[]
     for elem in ELEMENTS:
-        ec = ELEM_COLS[elem]
-        y_addr = addr(r, ec["y_org"])
-        D_addr = addr(r, ec["D"])
-        x_formula = f'=IFERROR({y_addr}/{D_addr},0)'
-        calc(ws, r, ec["x_aq"], x_formula)
-        total_org.append(addr(r, ec["y_org"]))
-        total_aq.append(addr(r, ec["x_aq"]))
+        ec=ELEM_COLS[elem]
+        calc(ws,r,ec["x_aq"],
+             f'=IFERROR({ad(r,ec["y_org"])}/{ad(r,ec["D"])},0)')
+        y_parts.append(ad(r,ec["y_org"]))
+        x_parts.append(ad(r,ec["x_aq"]))
+    calc(ws,r,TOT_ORG_COL,"="+"+".join(y_parts))
+    calc(ws,r,TOT_AQ_COL, "="+"+".join(x_parts))
 
-    calc(ws, r, TOTAL_ORG_COL,
-         "="+"+".join(total_org))
-    calc(ws, r, TOTAL_AQ_COL,
-         "="+"+".join(total_aq))
+# ── Panel D — Results ──────────────────────────────────────────────────────
+PD_DATA=PD_ROW+2
+for e_idx,elem in enumerate(ELEMENTS):
+    ec=ELEM_COLS[elem]
+    r_raff=PD_DATA+e_idx*3
+    r_load=r_raff+1
+    r_preg=r_raff+2
+    for r_ in [r_raff,r_load,r_preg]:
+        ws.row_dimensions[r_].height=15
 
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-# PANEL D — Results Summary
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-ws.merge_cells(start_row=PD_ROW, start_column=PD_COL,
-               end_row=PD_ROW, end_column=PD_COL+1)
-hdr(ws, PD_ROW, PD_COL, "PANEL D — Results Summary", span=2, bg=C["SECHDR"])
-hdr(ws, PD_ROW+1, PD_COL, "Metric")
-hdr(ws, PD_ROW+1, PD_COL+1, "Value (g/L)")
+    ref(ws,r_raff,PD_COL,f"Raffinate {elem}")
+    out(ws,r_raff,PD_COL+1,f'={ad(STAGE_ROW_START,ec["x_aq"])}')
 
-pd_data_start = PD_ROW + 2
-result_rows = []
-for e_idx, elem in enumerate(ELEMENTS):
-    ec = ELEM_COLS[elem]
-    # Raffinate = x_aq at stage 1
-    r_raff = pd_data_start + e_idx * 3
-    ws.row_dimensions[r_raff].height = 16
-    style_cell(ws, r_raff, PD_COL, C["REF_BG"], C["REF_FG"],
-               val=f"Raffinate {elem} (g/L)")
-    raff_addr = addr(STAGE_ROW_START, ec["x_aq"])
-    out(ws, r_raff, PD_COL+1, f"={raff_addr}")
+    ref(ws,r_load,PD_COL,f"Loaded Org {elem}")
+    ycol=get_column_letter(ec["y_org"])
+    yrange=f'{ycol}{STAGE_ROW_START}:{ycol}{STAGE_ROW_START+N_STAGES-1}'
+    out(ws,r_load,PD_COL+1,f'=IFERROR(INDEX({yrange},{N_EXT_REF}),0)')
 
-    # Loaded org at last extraction stage
-    r_load = r_raff + 1
-    ws.row_dimensions[r_load].height = 16
-    style_cell(ws, r_load, PD_COL, C["REF_BG"], C["REF_FG"],
-               val=f"Loaded Org {elem} (g/L)")
-    # INDEX on y_org column at row n_ext
-    y_col_letter = get_column_letter(ec["y_org"])
-    y_range = f"{y_col_letter}{STAGE_ROW_START}:{y_col_letter}{STAGE_ROW_START+N_STAGES-1}"
-    out(ws, r_load, PD_COL+1,
-        f'=IFERROR(INDEX({y_range},{N_EXT_REF}),0)')
+    ref(ws,r_preg,PD_COL,f"Pregnant {elem}")
+    xcol=get_column_letter(ec["x_aq"])
+    xrange=f'{xcol}{STAGE_ROW_START}:{xcol}{STAGE_ROW_START+N_STAGES-1}'
+    out(ws,r_preg,PD_COL+1,
+        f'=IFERROR(INDEX({xrange},{N_EXT_REF}+{N_SCR_REF}+{N_STR_REF}),0)')
 
-    # Pregnant solution = x_aq at strip exit stage
-    r_preg = r_raff + 2
-    ws.row_dimensions[r_preg].height = 16
-    style_cell(ws, r_preg, PD_COL, C["REF_BG"], C["REF_FG"],
-               val=f"Pregnant {elem} (g/L)")
-    x_col_letter = get_column_letter(ec["x_aq"])
-    x_range = f"{x_col_letter}{STAGE_ROW_START}:{x_col_letter}{STAGE_ROW_START+N_STAGES-1}"
-    # Preg = x_aq at stage n_ext+n_scr+n_str (last strip stage)
-    out(ws, r_preg, PD_COL+1,
-        f'=IFERROR(INDEX({x_range},{N_EXT_REF}+{N_SCR_REF}+{N_STR_REF}),0)')
+# ══════════════════════════════════════════════════════════════════════════════
+# STAGE PROFILE TABLE  (for charts)
+# ══════════════════════════════════════════════════════════════════════════════
+PROF_START=STAGE_ROW_START+N_STAGES+3
+ws.row_dimensions[PROF_START].height=18
+prof_end_col=1+N_EL
+ws.merge_cells(f"A{PROF_START}:{get_column_letter(prof_end_col)}{PROF_START}")
+hdr(ws,PROF_START,1,"STAGE AQUEOUS PROFILES  (g/L)",span=prof_end_col,bg=C["SECHDR"])
 
-# Panel E — O/A tracker
-ws.merge_cells(start_row=PE_ROW, start_column=PE_COL,
-               end_row=PE_ROW, end_column=PE_COL+2)
-hdr(ws, PE_ROW, PE_COL, "PANEL E — O/A Ratio Tracker", span=3, bg=C["SECHDR"])
-pe_labels = ["Section", "O/A (org/aq)", "Note"]
-for i, lbl in enumerate(pe_labels):
-    hdr(ws, PE_ROW+1, PE_COL+i, lbl)
+PROF_HDR=PROF_START+1
+ws.row_dimensions[PROF_HDR].height=16
+hdr(ws,PROF_HDR,1,"Stage")
+for e_idx,elem in enumerate(ELEMENTS):
+    hdr(ws,PROF_HDR,2+e_idx,f"x_aq {elem}",sz=8)
 
-pe_data = [
-    ("Extraction", f"={O_REF}/{F_REF}", "O/F"),
-    ("Scrub",      f"={O_REF}/({S_REF}*{R_REF}+0.001)", "O/(S*R)"),
-    ("Strip",      f"={O_REF}/{S_REF}", "O/S"),
-]
-for i, (sec, formula, note) in enumerate(pe_data):
-    r = PE_ROW + 2 + i
-    ws.row_dimensions[r].height = 16
-    style_cell(ws, r, PE_COL, C["STEP_BG"], C["STEP_FG"], val=sec)
-    out(ws, r, PE_COL+1, formula)
-    style_cell(ws, r, PE_COL+2, C["CALC_BG"], C["CALC_FG"], val=note)
+for n in range(1,N_STAGES+1):
+    r=PROF_HDR+n
+    ws.row_dimensions[r].height=13
+    sc(ws,r,1,C["STEP_BG"],C["STEP_FG"],val=n)
+    for e_idx,elem in enumerate(ELEMENTS):
+        ec=ELEM_COLS[elem]
+        src=ad(STAGE_ROW_START+n-1,ec["x_aq"])
+        calc(ws,r,2+e_idx,f'={src}')
 
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-# STAGE PROFILE TABLE (for charts) — after solver
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-PROF_START = STAGE_ROW_START + N_STAGES + 2
-ws.row_dimensions[PROF_START].height = 18
-ws.merge_cells(f"A{PROF_START}:J{PROF_START}")
-hdr(ws, PROF_START, 1, "STAGE AQUEOUS CONCENTRATION PROFILES  (g/L)",
-    span=10, bg=C["SECHDR"])
-
-PROF_HDR = PROF_START + 1
-ws.row_dimensions[PROF_HDR].height = 16
-hdr(ws, PROF_HDR, 1, "Stage")
-for e_idx, elem in enumerate(ELEMENTS):
-    hdr(ws, PROF_HDR, 2+e_idx, f"x_aq {elem}")
-
-for n in range(1, N_STAGES+1):
-    r = PROF_HDR + n
-    ws.row_dimensions[r].height = 14
-    style_cell(ws, r, 1, C["STEP_BG"], C["STEP_FG"], val=n)
-    for e_idx, elem in enumerate(ELEMENTS):
-        ec = ELEM_COLS[elem]
-        solver_row = STAGE_ROW_START + n - 1
-        ref = addr(solver_row, ec["x_aq"])
-        calc(ws, r, 2+e_idx, f"={ref}")
-
-# ── Line charts for aqueous profiles ──
-for e_idx, elem in enumerate(ELEMENTS):
-    from openpyxl.chart import LineChart
-    chart = LineChart()
-    chart.title = f"{elem} — Aqueous Profile vs Stage"
-    chart.style = 10
-    chart.y_axis.title = "x_aq (g/L)"
-    chart.x_axis.title = "Stage"
-    chart.height = 10
-    chart.width = 18
-
-    stage_col = 1
-    data_col = 2 + e_idx
-    data_ref = Reference(ws,
-                         min_col=data_col,
-                         min_row=PROF_HDR,
-                         max_row=PROF_HDR+N_STAGES)
-    cats = Reference(ws,
-                     min_col=stage_col,
-                     min_row=PROF_HDR+1,
-                     max_row=PROF_HDR+N_STAGES)
-    chart.add_data(data_ref, titles_from_data=True)
+# ── 4 selected line charts (U Th Hf Zr) to keep file manageable ──────────────
+chart_elems=["U","Th","Hf","Zr"]
+for i,elem in enumerate(chart_elems):
+    e_idx=ELEMENTS.index(elem)
+    chart=LineChart()
+    chart.title=f"{elem} — Aqueous Profile vs Stage"
+    chart.style=10
+    chart.y_axis.title="x_aq (g/L)"
+    chart.x_axis.title="Stage"
+    chart.height=10; chart.width=18
+    data_ref=Reference(ws,min_col=2+e_idx,
+                       min_row=PROF_HDR,max_row=PROF_HDR+N_STAGES)
+    cats=Reference(ws,min_col=1,
+                   min_row=PROF_HDR+1,max_row=PROF_HDR+N_STAGES)
+    chart.add_data(data_ref,titles_from_data=True)
     chart.set_categories(cats)
-    chart.series[0].graphicalProperties.line.solidFill = "1B3A6B"
+    anchor_row=PROF_HDR+N_STAGES+3+i*22
+    ws.add_chart(chart,f"A{anchor_row}")
 
-    anchor_row = PROF_HDR + N_STAGES + 2 + e_idx * 22
-    anchor_col = get_column_letter(1)
-    ws.add_chart(chart, f"{anchor_col}{anchor_row}")
-
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# ══════════════════════════════════════════════════════════════════════════════
 # ORGANIC LOADING SECTION
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-ORG_START = PROF_HDR + N_STAGES + 100
-ws.row_dimensions[ORG_START].height = 20
+# ══════════════════════════════════════════════════════════════════════════════
+ORG_START=PROF_HDR+N_STAGES+100
+ws.row_dimensions[ORG_START].height=20
 ws.merge_cells(f"A{ORG_START}:N{ORG_START}")
-c = ws.cell(row=ORG_START, column=1,
-            value="ORGANIC LOADING SECTION — Primene JMT Amine Capacity")
-c.fill = fill(C["SECHDR"])
-c.font = font("FFFFFF", bold=True, sz=12)
-c.alignment = center()
+c=ws.cell(row=ORG_START,column=1,
+          value="ORGANIC LOADING SECTION — Primene JMT Amine Capacity")
+c.fill=fl(C["SECHDR"]);c.font=fn("FFFFFF",bold=True,sz=12);c.alignment=al()
 
-org_rows = [
-    ("Extractant", "Primene JMT"),
-    ("MW Extractant (g/mol)", 353.7),
-    ("Density extractant (g/mL)", 0.812),
-    ("Vol% in diluent", 10.0),
-    ("Diluent", "Orfom"),
-    ("Density diluent (g/mL)", 0.785),
-    ("Note on saponification", "N/A — primary amine (not quaternary)"),
-    ("Experimental loading (%)", 80.0),
+org_inp=[
+    ("Extractant","Primene JMT"),
+    ("MW Extractant (g/mol)",353.7),
+    ("Density extractant (g/mL)",0.812),
+    ("Vol% in diluent",10.0),
+    ("Diluent","Orfom"),
+    ("Density diluent (g/mL)",0.785),
+    ("Note — saponification","N/A — primary amine"),
+    ("Experimental loading (%)",80.0),
 ]
-org_data_start = ORG_START + 1
-for i, (label, val) in enumerate(org_rows):
-    r = org_data_start + i
-    ws.row_dimensions[r].height = 16
-    style_cell(ws, r, 1, C["REF_BG"], C["REF_FG"], val=label, align="left")
-    if isinstance(val, str):
-        style_cell(ws, r, 2, C["CALC_BG"], C["CALC_FG"], val=val, align="left")
+ORG_DATA=ORG_START+1
+for i,(lbl,val) in enumerate(org_inp):
+    r=ORG_DATA+i
+    ws.row_dimensions[r].height=15
+    ref(ws,r,1,lbl)
+    if isinstance(val,str):
+        sc(ws,r,2,C["CALC_BG"],C["CALC_FG"],val=val,h="left")
     else:
-        inp(ws, r, 2, val)
+        inp(ws,r,2,val)
 
-# vol% row index
-VOL_R = org_data_start + 3  # 10.0
-MW_EXT_R = org_data_start + 1
-DENS_EXT_R = org_data_start + 2
-EXP_LOAD_R = org_data_start + 7
+VOL_R  =ORG_DATA+3
+MW_R   =ORG_DATA+1
+DENS_R =ORG_DATA+2
+EXP_R  =ORG_DATA+7
 
-calc_rows = [
-    ("Amine conc (mol/L)",
-     f"=({cr(VOL_R,2)}/100)*{cr(DENS_EXT_R,2)}*1000/{cr(MW_EXT_R,2)}"),
-    ("Avg MW metals (g/mol)",
-     f"=AVERAGE({cr(pc_data_start,PC_COL+2)}:{cr(pc_data_start+3,PC_COL+2)})"),
-]
-calc_r = org_data_start + len(org_rows)
-for label, formula in calc_rows:
-    ws.row_dimensions[calc_r].height = 16
-    style_cell(ws, calc_r, 1, C["REF_BG"], C["REF_FG"], val=label, align="left")
-    calc(ws, calc_r, 2, formula)
-    calc_r += 1
+calc_r=ORG_DATA+len(org_inp)
+ws.row_dimensions[calc_r].height=15
+ref(ws,calc_r,1,"Amine conc (mol/L)")
+AMINE_R=calc_r
+calc(ws,calc_r,2,
+     f'=({cr(VOL_R,2)}/100)*{cr(DENS_R,2)}*1000/{cr(MW_R,2)}')
 
-amine_conc_r = org_data_start + len(org_rows)
-avg_mw_r = amine_conc_r + 1
+calc_r+=1
+ws.row_dimensions[calc_r].height=15
+ref(ws,calc_r,1,"Avg MW metals (g/mol)")
+AVGMW_R=calc_r
+# Average MW of all 26 elements
+mw_vals=",".join([str(MW[e]) for e in ELEMENTS])
+calc(ws,calc_r,2,f'=AVERAGE({mw_vals})')
 
-ws.row_dimensions[calc_r].height = 16
-style_cell(ws, calc_r, 1, C["REF_BG"], C["REF_FG"],
-           val="Max loading (g metal/L org)", align="left")
-calc(ws, calc_r, 2,
-     f"={cr(amine_conc_r,2)}*{cr(avg_mw_r,2)}")
-calc_r += 1
+calc_r+=1
+ws.row_dimensions[calc_r].height=15
+ref(ws,calc_r,1,"Max loading (g metal/L org)")
+MAXLOAD_R=calc_r
+calc(ws,calc_r,2,f'={cr(AMINE_R,2)}*{cr(AVGMW_R,2)}')
 
-ws.row_dimensions[calc_r].height = 16
-style_cell(ws, calc_r, 1, C["REF_BG"], C["REF_FG"],
-           val="Actual loading (g/L)", align="left")
-out(ws, calc_r, 2,
-    f"={cr(calc_r-1,2)}*{cr(EXP_LOAD_R,2)}/100")
+calc_r+=1
+ws.row_dimensions[calc_r].height=15
+ref(ws,calc_r,1,"Actual loading (g/L)")
+out(ws,calc_r,2,f'={cr(MAXLOAD_R,2)}*{cr(EXP_R,2)}/100')
 
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# ══════════════════════════════════════════════════════════════════════════════
 # RESIDENCE TIME
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-RT_START = calc_r + 3
-ws.row_dimensions[RT_START].height = 20
+# ══════════════════════════════════════════════════════════════════════════════
+RT_START=calc_r+3
+ws.row_dimensions[RT_START].height=20
 ws.merge_cells(f"A{RT_START}:N{RT_START}")
-c = ws.cell(row=RT_START, column=1, value="RESIDENCE TIME ANALYSIS")
-c.fill = fill(C["SECHDR"])
-c.font = font("FFFFFF", bold=True, sz=12)
-c.alignment = center()
+c=ws.cell(row=RT_START,column=1,value="RESIDENCE TIME ANALYSIS")
+c.fill=fl(C["SECHDR"]);c.font=fn("FFFFFF",bold=True,sz=12);c.alignment=al()
 
-rt_inp_start = RT_START + 1
-rt_inputs = [
-    ("Mixer volume (m³)", 0.001),
-    ("Settler length (m)", 1.0),
-    ("Settler width (m)", 0.5),
-    ("Settler depth (m)", 0.2),
-    ("n settlers/stage", 1),
+rt_inps=[
+    ("Mixer volume (m³)",0.001),
+    ("Settler length (m)",1.0),
+    ("Settler width (m)",0.5),
+    ("Settler depth (m)",0.2),
+    ("n settlers/stage",1),
 ]
-RT_CELLS = {}
-for i, (label, val) in enumerate(rt_inputs):
-    r = rt_inp_start + i
-    ws.row_dimensions[r].height = 16
-    style_cell(ws, r, 1, C["REF_BG"], C["REF_FG"], val=label, align="left")
-    inp(ws, r, 2, val)
-    RT_CELLS[label] = cr(r, 2)
+RT_DATA=RT_START+1
+RT_CELLS={}
+for i,(lbl,val) in enumerate(rt_inps):
+    r=RT_DATA+i
+    ws.row_dimensions[r].height=15
+    ref(ws,r,1,lbl); inp(ws,r,2,val)
+    RT_CELLS[lbl]=cr(r,2)
 
-MIXER_V = RT_CELLS["Mixer volume (m³)"]
-SETT_L = RT_CELLS["Settler length (m)"]
-SETT_W = RT_CELLS["Settler width (m)"]
-SETT_D = RT_CELLS["Settler depth (m)"]
-N_SETT = RT_CELLS["n settlers/stage"]
+MV=RT_CELLS["Mixer volume (m³)"]; SL=RT_CELLS["Settler length (m)"]
+SW=RT_CELLS["Settler width (m)"]; SD=RT_CELLS["Settler depth (m)"]
+NS=RT_CELLS["n settlers/stage"]
 
-rt_hdr_row = rt_inp_start + len(rt_inputs) + 1
-ws.row_dimensions[rt_hdr_row].height = 34
-rt_cols = ["Section", "n stages", "Q_aq\n(mL/min)", "Q_tot\n(mL/min)",
-           "τ_mixer\n(min)", "V_settler\n(mL)", "τ_settler\n(min)",
-           "τ_stage\n(min)", "τ_section\n(min)"]
-for i, lbl in enumerate(rt_cols):
-    hdr(ws, rt_hdr_row, 1+i, lbl)
+rt_hdr=RT_DATA+len(rt_inps)+1
+ws.row_dimensions[rt_hdr].height=34
+for i,lbl in enumerate(["Section","n stages","Q_aq\n(mL/min)","Q_tot\n(mL/min)",
+                         "τ_mixer\n(min)","V_settler\n(mL)","τ_settler\n(min)",
+                         "τ_stage\n(min)","τ_section\n(min)"]):
+    hdr(ws,rt_hdr,1+i,lbl)
 
-rt_sections = [
-    ("Extraction", N_EXT_REF,
-     f"={F_REF}*1000",
-     f"=({F_REF}+{O_REF})*1000"),
-    ("Scrub", N_SCR_REF,
-     f"={S_REF}*{R_REF}*1000",
-     f"=({S_REF}*{R_REF}+{O_REF})*1000"),
-    ("Strip", N_STR_REF,
-     f"={S_REF}*1000",
-     f"=({S_REF}+{O_REF})*1000"),
+rt_secs=[
+    ("Extraction",N_EXT_REF, f"={F_REF}*1000",       f"=({F_REF}+{O_REF})*1000"),
+    ("Scrub",     N_SCR_REF, f"={S_REF}*{R_REF}*1000",f"=({S_REF}*{R_REF}+{O_REF})*1000"),
+    ("Strip",     N_STR_REF, f"={S_REF}*1000",        f"=({S_REF}+{O_REF})*1000"),
 ]
-rt_data_start = rt_hdr_row + 1
-for i, (sec, n_stages, q_aq, q_tot) in enumerate(rt_sections):
-    r = rt_data_start + i
-    ws.row_dimensions[r].height = 16
-    style_cell(ws, r, 1, C["STEP_BG"], C["STEP_FG"], val=sec)
-    ref_cell(ws, r, 2, f"={n_stages}")
-    calc(ws, r, 3, q_aq)
-    calc(ws, r, 4, q_tot)
-    # τ_mixer = V_mixer(mL) / Q_tot  (V_mixer in m3 → *1e6 to mL)
-    calc(ws, r, 5, f"=({MIXER_V}*1000000)/{addr(r,4)}")
-    # V_settler = L*W*D * n_sett * 1e6 (m3→mL)
-    calc(ws, r, 6, f"={SETT_L}*{SETT_W}*{SETT_D}*{N_SETT}*1000000")
-    # τ_settler
-    calc(ws, r, 7, f"={addr(r,6)}/{addr(r,4)}")
-    # τ_stage = τ_mixer + τ_settler
-    calc(ws, r, 8, f"={addr(r,5)}+{addr(r,7)}")
-    # τ_section = n_stages * τ_stage
-    calc(ws, r, 9, f"={addr(r,2)}*{addr(r,8)}")
+RT_ROW_BASE=rt_hdr+1
+for i,(sec,ns_ref,qaq,qtot) in enumerate(rt_secs):
+    r=RT_ROW_BASE+i
+    ws.row_dimensions[r].height=15
+    sc(ws,r,1,C["STEP_BG"],C["STEP_FG"],val=sec)
+    ref(ws,r,2,f'={ns_ref}')
+    calc(ws,r,3,qaq); calc(ws,r,4,qtot)
+    calc(ws,r,5,f'=({MV}*1000000)/{ad(r,4)}')
+    calc(ws,r,6,f'={SL}*{SW}*{SD}*{NS}*1000000')
+    calc(ws,r,7,f'={ad(r,6)}/{ad(r,4)}')
+    calc(ws,r,8,f'={ad(r,5)}+{ad(r,7)}')
+    calc(ws,r,9,f'={ad(r,2)}*{ad(r,8)}')
 
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-# STEADY-STATE TIME ESTIMATOR
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-SS_START = rt_data_start + len(rt_sections) + 2
-ws.row_dimensions[SS_START].height = 18
+# Steady-state estimator
+SS_START=RT_ROW_BASE+3+2
+ws.row_dimensions[SS_START].height=18
 ws.merge_cells(f"A{SS_START}:N{SS_START}")
-hdr(ws, SS_START, 1, "STEADY-STATE TIME ESTIMATOR  (Ritcey & Ashbrook 1979; Perry's 8th Ed. §15-42)",
-    span=14, bg=C["SECHDR"])
+hdr(ws,SS_START,1,"STEADY-STATE TIME ESTIMATOR  (Ritcey & Ashbrook 1979; Perry's 8th §15-42)",
+    span=14,bg=C["SECHDR"])
 
-ss_data = SS_START + 1
-ws.row_dimensions[ss_data].height = 16
-style_cell(ws, ss_data, 1, C["REF_BG"], C["REF_FG"], val="Safety factor", align="left")
-inp(ws, ss_data, 2, 3)
-SF_REF = cr(ss_data, 2)
+ss=SS_START+1
+ref(ws,ss,1,"Safety factor"); inp(ws,ss,2,3); SF=cr(ss,2)
+ss+=1
+tau_range=f'{ad(RT_ROW_BASE,9)}:{ad(RT_ROW_BASE+2,9)}'
+ref(ws,ss,1,"τ_max (min)"); calc(ws,ss,2,f'=MAX({tau_range})'); TAU=cr(ss,2)
+ss+=1
+ref(ws,ss,1,"t_SS = factor × τ_max (min)"); out(ws,ss,2,f'={SF}*{TAU}')
+ss+=1
+sec_range=f'A{RT_ROW_BASE}:A{RT_ROW_BASE+2}'
+ref(ws,ss,1,"Bottleneck section")
+calc(ws,ss,2,f'=IFERROR(INDEX({sec_range},MATCH(MAX({tau_range}),{tau_range},0)),"—")')
 
-ss_data += 1
-ws.row_dimensions[ss_data].height = 16
-style_cell(ws, ss_data, 1, C["REF_BG"], C["REF_FG"],
-           val="τ_max (bottleneck, min)", align="left")
-tau_range = (f"{addr(rt_data_start,9)}:{addr(rt_data_start+2,9)}")
-calc(ws, ss_data, 2, f"=MAX({tau_range})")
-TAU_MAX = cr(ss_data, 2)
-
-ss_data += 1
-ws.row_dimensions[ss_data].height = 16
-style_cell(ws, ss_data, 1, C["REF_BG"], C["REF_FG"],
-           val="t_SS = factor × τ_max (min)", align="left")
-out(ws, ss_data, 2, f"={SF_REF}*{TAU_MAX}")
-
-ss_data += 1
-ws.row_dimensions[ss_data].height = 16
-style_cell(ws, ss_data, 1, C["REF_BG"], C["REF_FG"],
-           val="Bottleneck section", align="left")
-sec_range_col = get_column_letter(1)
-sec_range = f"{sec_range_col}{rt_data_start}:{sec_range_col}{rt_data_start+2}"
-tau_col_range = f"{get_column_letter(9)}{rt_data_start}:{get_column_letter(9)}{rt_data_start+2}"
-calc(ws, ss_data, 2,
-     f'=IFERROR(INDEX({sec_range},MATCH(MAX({tau_col_range}),{tau_col_range},0)),"—")')
-
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-# FEED VARIABILITY SCENARIO
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-FV_START = ss_data + 3
-ws.row_dimensions[FV_START].height = 18
+# Feed variability
+FV_START=ss+3
+ws.row_dimensions[FV_START].height=18
 ws.merge_cells(f"A{FV_START}:N{FV_START}")
-hdr(ws, FV_START, 1, "FEED VARIABILITY SCENARIO  (Zr feed multipliers)",
-    span=14, bg=C["SECHDR"])
+hdr(ws,FV_START,1,"FEED VARIABILITY SCENARIO  (Zr × k1/k2)",
+    span=14,bg=C["SECHDR"])
 
-fv_inp = FV_START + 1
-style_cell(ws, fv_inp, 1, C["REF_BG"], C["REF_FG"], val="k1 (Zr × high)", align="left")
-inp(ws, fv_inp, 2, 1.20)
-K1 = cr(fv_inp, 2)
+fv=FV_START+1
+ref(ws,fv,1,"k1 (Zr × high)"); inp(ws,fv,2,1.20); K1=cr(fv,2)
+fv+=1
+ref(ws,fv,1,"k2 (Zr × low)");  inp(ws,fv,2,0.80); K2=cr(fv,2)
+fv+=1
+ZR_FEED=PC_CELLS["Zr"]["XF"]
+for i,lbl in enumerate(["Metric","Normal","Zr×k1","Zr×k2"]):
+    hdr(ws,fv,1+i,lbl)
+fv+=1
+ref(ws,fv,1,"Effective Zr feed (g/L)")
+out(ws,fv,2,f'={ZR_FEED}')
+out(ws,fv,3,f'={ZR_FEED}*{K1}')
+out(ws,fv,4,f'={ZR_FEED}*{K2}')
 
-fv_inp += 1
-style_cell(ws, fv_inp, 1, C["REF_BG"], C["REF_FG"], val="k2 (Zr × low)", align="left")
-inp(ws, fv_inp, 2, 0.80)
-K2 = cr(fv_inp, 2)
-
-fv_hdr = fv_inp + 2
-ws.row_dimensions[fv_hdr].height = 34
-fv_col_labels = ["Metric", "Normal", f"Zr×k1", f"Zr×k2"]
-for i, lbl in enumerate(fv_col_labels):
-    hdr(ws, fv_hdr, 1+i, lbl)
-
-# Zr feed ref
-ZR_FEED_REF = PC_CELLS["Zr"]["XF"]
-
-# We reference the regression-linked P/Q for Zr indirectly through the TDMA results.
-# For the scenario table we just show the key results and note that
-# re-running with modified feed requires Solver/VBA.
-# Instead, we add a simple analytical approximation row.
-fv_metrics = [
-    ("Note", "Scenario requires re-solve; values below use stored TDMA output", "", ""),
-    ("Loaded Org Zr (g/L)", "See Panel D", "Zr feed × k1", "Zr feed × k2"),
-    ("Raff U (g/L)", "See Panel D row U", "—", "—"),
-    ("Preg Zr (g/L)", "See Panel D row Zr", "—", "—"),
-]
-fv_data = fv_hdr + 1
-for label, n_val, k1_val, k2_val in fv_metrics:
-    ws.row_dimensions[fv_data].height = 16
-    style_cell(ws, fv_data, 1, C["REF_BG"], C["REF_FG"], val=label, align="left")
-    style_cell(ws, fv_data, 2, C["CALC_BG"], C["CALC_FG"], val=n_val, align="left")
-    style_cell(ws, fv_data, 3, C["CALC_BG"], C["CALC_FG"], val=k1_val, align="left")
-    style_cell(ws, fv_data, 4, C["CALC_BG"], C["CALC_FG"], val=k2_val, align="left")
-    fv_data += 1
-
-# Effective Zr feed row
-ws.row_dimensions[fv_data].height = 16
-style_cell(ws, fv_data, 1, C["REF_BG"], C["REF_FG"],
-           val="Effective Zr feed (g/L)", align="left")
-out(ws, fv_data, 2, f"={ZR_FEED_REF}")
-out(ws, fv_data, 3, f"={ZR_FEED_REF}*{K1}")
-out(ws, fv_data, 4, f"={ZR_FEED_REF}*{K2}")
-
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-# Save
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-OUT_FILE = "SX_Steady_State_Model_UThHfZr.xlsx"
-wb.save(OUT_FILE)
-print(f"Saved: {OUT_FILE}")
+# ── Save ───────────────────────────────────────────────────────────────────────
+OUT="SX_Steady_State_Model_26elem.xlsx"
+wb.save(OUT)
+print(f"Saved: {OUT}")
