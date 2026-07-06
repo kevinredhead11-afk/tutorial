@@ -2,6 +2,11 @@
 build_excel.py  —  SX_Steady_State_Model_26elem.xlsx
 Primene JMT / dual-acid SX  |  H2SO4 loading, HNO3 stripping
 26 elements: Al Sc Fe Co Zn Ga Rb Y Zr La Ce Pr Nd Sm Eu Gd Tb Dy Ho Er Tm Yb Lu Hf Th U
+
+Sheets:
+  1. "Regression"  — 7-point log-log regression per element (loading + stripping)
+                     Outputs: P, Q, R², R²_adj, SE_Q, n per element × acid system
+  2. "SX Model"    — TDMA solver; Panel B P/Q linked from Regression sheet
 openpyxl only
 """
 
@@ -115,9 +120,304 @@ def ad(row,col): return f"{get_column_letter(col)}{row}"
 
 # ── Workbook ───────────────────────────────────────────────────────────────────
 wb = Workbook()
-ws = wb.active
-ws.title = "SX Model"
+
+# ══════════════════════════════════════════════════════════════════════════════
+# SHEET 1 — REGRESSION
+# Layout:
+#   Panel L  (Loading  H2SO4): rows 4-onwards, cols 1 to 2+2*N_EL
+#   Panel S  (Stripping HNO3): same row range, starts at col 2+2*N_EL+2
+#   D-value table (7 rows × 26 elem) per panel — auto-calculated
+#   Regression summary table (26 rows × 8 cols):
+#     Element | n | P_load | Q_load | R²_load | R²adj_load | SE_Q_load |
+#             | P_strip | Q_strip | R²_strip | R²adj_strip | SE_Q_strip
+# ══════════════════════════════════════════════════════════════════════════════
+wr = wb.active
+wr.title = "Regression"
+wr.sheet_properties.tabColor = "2E7D32"
+
+N_PTS = 7   # experimental data points per element per acid system
+
+for col in range(1, 300):
+    wr.column_dimensions[get_column_letter(col)].width = 11
+wr.column_dimensions["A"].width = 14
+
+# ── Title ──────────────────────────────────────────────────────────────────────
+wr.row_dimensions[1].height = 26
+total_cols = 2 + 2 * N_EL
+wr.merge_cells(f"A1:{get_column_letter(total_cols * 2 + 3)}1")
+c = wr.cell(row=1, column=1,
+    value=("P/Q LOG-LOG REGRESSION  |  D = P × [acid]^Q  |  "
+           "7 experimental points × 26 elements × 2 acid systems  "
+           "(H₂SO₄ loading  /  HNO₃ stripping)"))
+c.fill = fl("2E7D32"); c.font = fn("FFFFFF", bold=True, sz=12); c.alignment = al()
+
+# Colour legend row 2
+wr.row_dimensions[2].height = 14
+for i, (lbl, bg, fg) in enumerate([
+    ("INPUT", C["INPUT_BG"], C["INPUT_FG"]),
+    ("CALC",  C["CALC_BG"],  C["CALC_FG"]),
+    ("OUTPUT",C["OUT_BG"],   C["OUT_FG"]),
+]):
+    col_s = 1 + i * 4
+    wr.merge_cells(start_row=2, start_column=col_s, end_row=2, end_column=col_s+3)
+    c = wr.cell(row=2, column=col_s, value=lbl)
+    c.fill = fl(bg); c.font = fn(fg, bold=True, sz=9); c.alignment = al()
+
+wr.row_dimensions[3].height = 5
+
+# ── Input table builder (shared for Loading and Stripping panels) ───────────
+# Each panel:
+#   col base+0       : Point#  (1-7)
+#   col base+1       : [acid] N  ← INPUT yellow
+#   col base+2 to base+1+N_EL   : C_aq per element  ← INPUT
+#   col base+2+N_EL  to base+1+2*N_EL : C_org per element ← INPUT
+PANEL_W_R = 2 + 2 * N_EL   # 54 cols
+
+R_LOAD_COL  = 1
+R_STRIP_COL = R_LOAD_COL + PANEL_W_R + 2
+
+def build_reg_panel(ws_r, base_col, title, bg_title, acid_label, pt_row_start):
+    """Build input + D-calc block for one acid system. Returns first data row."""
+    ws_r.row_dimensions[pt_row_start - 2].height = 18
+    hdr(ws_r, pt_row_start - 2, base_col, title, span=PANEL_W_R,
+        bg=bg_title, fg="FFFFFF", sz=11)
+
+    # Column headers
+    ws_r.row_dimensions[pt_row_start - 1].height = 34
+    hdr(ws_r, pt_row_start - 1, base_col,     "Pt#", sz=9)
+    hdr(ws_r, pt_row_start - 1, base_col + 1, f"{acid_label}\n(N)", sz=9)
+    for i, e in enumerate(ELEMENTS):
+        hdr(ws_r, pt_row_start - 1, base_col + 2 + i,        f"C_aq\n{e}\n(ppm)", sz=8)
+        hdr(ws_r, pt_row_start - 1, base_col + 2 + N_EL + i, f"C_org\n{e}\n(ppm)", sz=8)
+
+    # 7 data rows
+    for pt in range(1, N_PTS + 1):
+        r = pt_row_start + pt - 1
+        ws_r.row_dimensions[r].height = 15
+        sc(ws_r, r, base_col, C["STEP_BG"], C["STEP_FG"], val=pt)
+        inp(ws_r, r, base_col + 1)   # [acid]
+        for i in range(N_EL):
+            inp(ws_r, r, base_col + 2 + i)           # C_aq
+            inp(ws_r, r, base_col + 2 + N_EL + i)    # C_org
+
+    return pt_row_start
+
+PT_ROW_BASE = 6   # first actual data row is 6 (headers at 4-5)
+
+R_L_DATA = build_reg_panel(wr, R_LOAD_COL,  "LOADING DATA  (H₂SO₄ system)",
+                            C["COLHDR"], "H₂SO₄", PT_ROW_BASE)
+R_S_DATA = build_reg_panel(wr, R_STRIP_COL, "STRIPPING DATA  (HNO₃ system)",
+                            "1B5E20",    "HNO₃",  PT_ROW_BASE)
+
+# ── D-value table (auto-calculated from input rows) ───────────────────────────
+D_HDR_R = PT_ROW_BASE + N_PTS + 1   # row 14
+
+wr.row_dimensions[D_HDR_R].height = 18
+D_PANEL_W_R = 1 + N_EL
+hdr(wr, D_HDR_R, R_LOAD_COL,  "D VALUES  (C_org / C_aq)  — Loading",
+    span=D_PANEL_W_R, bg=C["COLHDR"])
+hdr(wr, D_HDR_R, R_STRIP_COL, "D VALUES  (C_org / C_aq)  — Stripping",
+    span=D_PANEL_W_R, bg="1B5E20", fg="FFFFFF")
+
+D_COL_HDR_R = D_HDR_R + 1
+wr.row_dimensions[D_COL_HDR_R].height = 16
+hdr(wr, D_COL_HDR_R, R_LOAD_COL,  "Pt#")
+hdr(wr, D_COL_HDR_R, R_STRIP_COL, "Pt#")
+for i, e in enumerate(ELEMENTS):
+    hdr(wr, D_COL_HDR_R, R_LOAD_COL  + 1 + i, f"D_{e}", sz=8)
+    hdr(wr, D_COL_HDR_R, R_STRIP_COL + 1 + i, f"D_{e}", sz=8)
+
+D_DATA_R = D_COL_HDR_R + 1   # row 16
+for pt in range(1, N_PTS + 1):
+    r = D_DATA_R + pt - 1
+    wr.row_dimensions[r].height = 15
+    inp_r = R_L_DATA + pt - 1
+    sc(wr, r, R_LOAD_COL,  C["STEP_BG"], C["STEP_FG"], val=pt)
+    sc(wr, r, R_STRIP_COL, C["STEP_BG"], C["STEP_FG"], val=pt)
+    for e_idx in range(N_EL):
+        # Loading D
+        aq_col  = R_LOAD_COL + 2 + e_idx
+        org_col = R_LOAD_COL + 2 + N_EL + e_idx
+        aqa  = ad(inp_r, aq_col);  orga = ad(inp_r, org_col)
+        calc(wr, r, R_LOAD_COL + 1 + e_idx,
+             f'=IFERROR(IF(OR({aqa}="",{orga}="",VALUE({aqa})=0),"",{orga}/{aqa}),"N/A")')
+        # Stripping D
+        aq_col  = R_STRIP_COL + 2 + e_idx
+        org_col = R_STRIP_COL + 2 + N_EL + e_idx
+        inp_r_s = R_S_DATA + pt - 1
+        aqa  = ad(inp_r_s, aq_col); orga = ad(inp_r_s, org_col)
+        calc(wr, r, R_STRIP_COL + 1 + e_idx,
+             f'=IFERROR(IF(OR({aqa}="",{orga}="",VALUE({aqa})=0),"",{orga}/{aqa}),"N/A")')
+
+# ── Regression summary table ───────────────────────────────────────────────────
+RS_R_HDR = D_DATA_R + N_PTS + 1   # row 24
+
+wr.row_dimensions[RS_R_HDR].height = 18
+sum_cols = 13
+wr.merge_cells(f"A{RS_R_HDR}:{get_column_letter(sum_cols)}{RS_R_HDR}")
+c = wr.cell(row=RS_R_HDR, column=1,
+    value="REGRESSION SUMMARY  (n=7 points per element per acid system)")
+c.fill = fl(C["SECHDR"]); c.font = fn("FFFFFF", bold=True, sz=11); c.alignment = al()
+
+RS_R_COL_HDR = RS_R_HDR + 1
+wr.row_dimensions[RS_R_COL_HDR].height = 42
+for i, lbl in enumerate([
+    "Element", "n_valid",
+    "P_load", "Q_load", "R²_load", "R²adj_load", "SE_Q_load",
+    "P_strip","Q_strip","R²_strip","R²adj_strip","SE_Q_strip",
+    "Notes",
+]):
+    hdr(wr, RS_R_COL_HDR, 1 + i, lbl, sz=9,
+        bg=C["EXT_T"] if i < 7 else C["STR_T"],
+        fg=C["SECHDR"])
+
+RS_R_DATA = RS_R_COL_HDR + 1   # row 26  ← Panel B in SX Model references here
+
+# Helper: range for D values of one element across N_PTS rows
+def d_range_r(base_col, e_idx):
+    col = base_col + 1 + e_idx
+    return f"{ad(D_DATA_R, col)}:{ad(D_DATA_R + N_PTS - 1, col)}"
+
+def acid_range_r(base_col):
+    col = base_col + 1   # [acid] column
+    return f"{ad(R_L_DATA if base_col==R_LOAD_COL else R_S_DATA, col)}:{ad((R_L_DATA if base_col==R_LOAD_COL else R_S_DATA)+N_PTS-1, col)}"
+
+# Regression formulas using ISNUMBER to filter blank / "N/A" D cells
+def reg_n(d_rng):
+    return f'=SUMPRODUCT((ISNUMBER({d_rng})*1))'
+
+def reg_P(d_rng, acid_rng):
+    return (f'=IFERROR(IF(SUMPRODUCT(ISNUMBER({d_rng})*1)<2,"Need≥2",'
+            f'EXP(INTERCEPT('
+            f'IF(ISNUMBER({d_rng}),LN({d_rng}),FALSE),'
+            f'IF(ISNUMBER({d_rng}),LN({acid_rng}),FALSE)))),"N/A")')
+
+def reg_Q(d_rng, acid_rng):
+    return (f'=IFERROR(IF(SUMPRODUCT(ISNUMBER({d_rng})*1)<2,"Need≥2",'
+            f'SLOPE('
+            f'IF(ISNUMBER({d_rng}),LN({d_rng}),FALSE),'
+            f'IF(ISNUMBER({d_rng}),LN({acid_rng}),FALSE))),"N/A")')
+
+def reg_R2(d_rng, acid_rng):
+    return (f'=IFERROR(IF(SUMPRODUCT(ISNUMBER({d_rng})*1)<2,"Need≥2",'
+            f'RSQ('
+            f'IF(ISNUMBER({d_rng}),LN({d_rng}),FALSE),'
+            f'IF(ISNUMBER({d_rng}),LN({acid_rng}),FALSE))),"N/A")')
+
+def reg_R2adj(d_rng, acid_rng, n_cell):
+    """R²_adj = 1 - (1-R²)*(n-1)/(n-2)  for simple linear regression (1 predictor)"""
+    r2 = reg_R2(d_rng, acid_rng).lstrip("=")
+    return (f'=IFERROR(IF(SUMPRODUCT(ISNUMBER({d_rng})*1)<3,"Need≥3",'
+            f'1-(1-({r2}))*({n_cell}-1)/({n_cell}-2)),"N/A")')
+
+def reg_SEQ(d_rng, acid_rng, n_cell):
+    """SE(Q) = sqrt( (1-R²) / (R²*(n-2)) ) * STDEV(ln D) / STDEV(ln acid)
+       Simplified: SE_b from OLS = sqrt(MSE / Sxx)
+       = sqrt( (1-R²)*VAR(lnD) / ((n-2)*VAR(lnAcid)) )  — valid for LN-LN"""
+    r2 = reg_R2(d_rng, acid_rng).lstrip("=")
+    return (f'=IFERROR(IF(SUMPRODUCT(ISNUMBER({d_rng})*1)<3,"Need≥3",'
+            f'SQRT((1-({r2}))'
+            f'*VAR(IF(ISNUMBER({d_rng}),LN({d_rng}),FALSE))'
+            f'/(({n_cell}-2)'
+            f'*VAR(IF(ISNUMBER({d_rng}),LN({acid_rng}),FALSE))))),"N/A")')
+
+# Store references for SX Model to use
+REG_SHEET_CELLS = {}   # elem -> {"P_load":(row,col), ...}  on Regression sheet
+
+load_acid_r = acid_range_r(R_LOAD_COL)
+strip_acid_r= acid_range_r(R_STRIP_COL)
+
+for e_idx, elem in enumerate(ELEMENTS):
+    r = RS_R_DATA + e_idx
+    wr.row_dimensions[r].height = 15
+    sc(wr, r, 1, C["STEP_BG"], C["STEP_FG"], val=elem)
+
+    ld_d = d_range_r(R_LOAD_COL,  e_idx)
+    st_d = d_range_r(R_STRIP_COL, e_idx)
+    n_cell_ld = f"B{r}"   # n_valid col
+
+    # n_valid (loading — same for both since same 7 pts)
+    calc(wr, r, 2, reg_n(ld_d))
+    nc = f"B{r}"
+
+    out(wr,  r,  3, reg_P(ld_d,  load_acid_r))
+    out(wr,  r,  4, reg_Q(ld_d,  load_acid_r))
+    calc(wr, r,  5, reg_R2(ld_d, load_acid_r))
+    calc(wr, r,  6, reg_R2adj(ld_d, load_acid_r, nc))
+    calc(wr, r,  7, reg_SEQ(ld_d,  load_acid_r, nc))
+    out(wr,  r,  8, reg_P(st_d,  strip_acid_r))
+    out(wr,  r,  9, reg_Q(st_d,  strip_acid_r))
+    calc(wr, r, 10, reg_R2(st_d, strip_acid_r))
+    calc(wr, r, 11, reg_R2adj(st_d, strip_acid_r, nc))
+    calc(wr, r, 12, reg_SEQ(st_d,  strip_acid_r, nc))
+
+    # Quality flag: R²_adj < 0.85 → "Check fit"
+    r2adj_addr = ad(r, 6)
+    calc(wr, r, 13,
+         f'=IF(ISNUMBER({r2adj_addr}),IF({r2adj_addr}<0.85,"⚠ Check fit","OK"),"")')
+
+    REG_SHEET_CELLS[elem] = {
+        "P_load" : (r, 3), "Q_load" : (r, 4),
+        "P_strip": (r, 8), "Q_strip": (r, 9),
+    }
+
+# ── Scatter charts: one per element (log D vs log acid, loading + stripping) ──
+# Only generate for the 4 key elements to keep file light; add note for others.
+CHART_ELEMS_R = ["U", "Th", "Hf", "Zr"]
+for i, elem in enumerate(CHART_ELEMS_R):
+    e_idx = ELEMENTS.index(elem)
+    chart = ScatterChart()
+    chart.title = f"{elem} — log D vs log [acid]"
+    chart.style = 10
+    chart.x_axis.title = "LN([acid])"
+    chart.y_axis.title = "LN(D)"
+    chart.height = 10; chart.width = 16
+
+    for panel_col, panel_label, color in [
+        (R_LOAD_COL,  "Loading",   "1B3A6B"),
+        (R_STRIP_COL, "Stripping", "2E7D32"),
+    ]:
+        d_col   = panel_col + 1 + e_idx
+        acid_col= panel_col + 1
+        # We can't plot LN() directly from chart references; reference raw D rows
+        # and note that D is on linear scale. Use D values as proxy.
+        d_ref   = Reference(wr, min_col=d_col,   min_row=D_DATA_R, max_row=D_DATA_R+N_PTS-1)
+        acid_ref= Reference(wr, min_col=acid_col, min_row=R_L_DATA if panel_col==R_LOAD_COL else R_S_DATA,
+                            max_row=(R_L_DATA if panel_col==R_LOAD_COL else R_S_DATA)+N_PTS-1)
+        s = Series(d_ref, xvalues=acid_ref, title=panel_label)
+        s.marker.symbol = "circle" if panel_col == R_LOAD_COL else "triangle"
+        s.marker.size = 5
+        s.graphicalProperties.line.noFill = True
+        s.graphicalProperties.solidFill = color
+        chart.series.append(s)
+
+    anchor_row = RS_R_DATA + N_EL + 3 + i * 22
+    wr.add_chart(chart, f"A{anchor_row}")
+
+# Note for remaining elements
+note_r = RS_R_DATA + N_EL + 2
+wr.merge_cells(f"A{note_r}:N{note_r}")
+c = wr.cell(row=note_r, column=1,
+    value="Charts above: U, Th, Hf, Zr (key elements). "
+          "All 26 regressions computed in the summary table above.")
+c.fill = fl(C["REF_BG"]); c.font = fn(C["REF_FG"], sz=9)
+
+# ══════════════════════════════════════════════════════════════════════════════
+# SHEET 2 — SX MODEL  (add after Regression sheet)
+# ══════════════════════════════════════════════════════════════════════════════
+ws = wb.create_sheet("SX Model")
 ws.sheet_properties.tabColor = C["TITLE"]
+
+# REG_CELLS now points to Regression sheet — cross-sheet references
+REG_CELLS = {}
+for elem in ELEMENTS:
+    rc = REG_SHEET_CELLS[elem]
+    REG_CELLS[elem] = {
+        "P_load" : rc["P_load"],
+        "Q_load" : rc["Q_load"],
+        "P_strip": rc["P_strip"],
+        "Q_strip": rc["Q_strip"],
+    }
 
 # Default column width
 for col in range(1,600):
@@ -148,156 +448,13 @@ for lbl,bg,fg in legend:
 
 ws.row_dimensions[3].height=5
 
-# ══════════════════════════════════════════════════════════════════════════════
-# SECTION 0 — REGRESSION  (rows 4+)
-# Layout of each panel (Loading / Stripping):
-#   col 1          : Stage
-#   col 2          : [acid] N
-#   col 3          : Flow_aq
-#   col 4          : Flow_org
-#   cols 5 to 5+N_EL-1  : C_aq per element
-#   cols 5+N_EL to 5+2*N_EL-1 : C_org per element
-# Panel width = 4 + 2*N_EL
-# ══════════════════════════════════════════════════════════════════════════════
-REG_START = 4
-PANEL_W = 4 + 2*N_EL          # 4 + 52 = 56
-
-LOAD_COL  = 1
-STRIP_COL = LOAD_COL + PANEL_W + 1   # 58
-
-ws.row_dimensions[REG_START].height=20
-ws.merge_cells(f"A{REG_START}:{get_column_letter(STRIP_COL+PANEL_W)}{REG_START}")
-c=ws.cell(row=REG_START,column=1,
-          value="SECTION 0 — P/Q REGRESSION  (D = P × [acid]^Q  via log-log linear regression)")
-c.fill=fl(C["SECHDR"]);c.font=fn("FFFFFF",bold=True,sz=11);c.alignment=al()
-
-STAGE_LBLS_L = ["L1","L2","L3"]
-STAGE_LBLS_S = ["S1","S2","S3"]
-N_STAGES_REG = 3
-
-def build_panel_header(ws, base_row, base_col, title, bg_title):
-    """Build 3-row header for a regression input panel."""
-    ws.row_dimensions[base_row].height=16
-    hdr(ws, base_row, base_col, title, span=PANEL_W, bg=bg_title, fg=C["SECHDR"], sz=10)
-    ws.row_dimensions[base_row+1].height=30
-    hdr(ws,base_row+1,base_col,   "Stage")
-    hdr(ws,base_row+1,base_col+1, "[acid]\nN")
-    hdr(ws,base_row+1,base_col+2, "Flow_aq\n(mL/min)")
-    hdr(ws,base_row+1,base_col+3, "Flow_org\n(mL/min)")
-    for i,e in enumerate(ELEMENTS):
-        hdr(ws,base_row+1,base_col+4+i,     f"{e}_aq\n(ppm)")
-        hdr(ws,base_row+1,base_col+4+N_EL+i,f"{e}_org\n(ppm)")
-
-build_panel_header(ws, REG_START+1, LOAD_COL,  "LOADING DATA  (H₂SO₄ system)", C["EXT_T"])
-build_panel_header(ws, REG_START+1, STRIP_COL, "STRIPPING DATA  (HNO₃ system)", C["STR_T"])
-
-# Input data rows
-INP_ROW_BASE = REG_START + 3   # first data row = row 7
-for i,(ll,sl) in enumerate(zip(STAGE_LBLS_L, STAGE_LBLS_S)):
-    r = INP_ROW_BASE + i
-    ws.row_dimensions[r].height=15
-    sc(ws,r,LOAD_COL, C["STEP_BG"],C["STEP_FG"],val=ll)
-    sc(ws,r,STRIP_COL,C["STEP_BG"],C["STEP_FG"],val=sl)
-    for c_off in range(1, PANEL_W):
-        inp(ws,r,LOAD_COL +c_off)
-        inp(ws,r,STRIP_COL+c_off)
-
-# ── Calculated D values ────────────────────────────────────────────────────────
-D_HDR_ROW = INP_ROW_BASE + N_STAGES_REG + 1  # row 11
-D_PANEL_W = 1 + N_EL   # stage + N_EL D cols
-
-ws.row_dimensions[D_HDR_ROW].height=18
-hdr(ws,D_HDR_ROW,LOAD_COL,  "CALCULATED D VALUES  (C_org/C_aq)", span=D_PANEL_W, bg=C["COLHDR"])
-hdr(ws,D_HDR_ROW,STRIP_COL, "CALCULATED D VALUES  (C_org/C_aq)", span=D_PANEL_W, bg=C["COLHDR"])
-
-D_COL_HDR = D_HDR_ROW+1
-ws.row_dimensions[D_COL_HDR].height=16
-hdr(ws,D_COL_HDR,LOAD_COL,"Stage")
-hdr(ws,D_COL_HDR,STRIP_COL,"Stage")
-for i,e in enumerate(ELEMENTS):
-    hdr(ws,D_COL_HDR,LOAD_COL +1+i,f"D_{e}")
-    hdr(ws,D_COL_HDR,STRIP_COL+1+i,f"D_{e}")
-
-D_DATA_ROW = D_COL_HDR+1  # row 13
-for i,(ll,sl) in enumerate(zip(STAGE_LBLS_L,STAGE_LBLS_S)):
-    r=D_DATA_ROW+i
-    ws.row_dimensions[r].height=15
-    inp_r=INP_ROW_BASE+i
-    sc(ws,r,LOAD_COL, C["STEP_BG"],C["STEP_FG"],val=ll)
-    sc(ws,r,STRIP_COL,C["STEP_BG"],C["STEP_FG"],val=sl)
-    for e_idx in range(N_EL):
-        # Loading
-        aq_c  = LOAD_COL+4+e_idx
-        org_c = LOAD_COL+4+N_EL+e_idx
-        aqa=ad(inp_r,aq_c); orga=ad(inp_r,org_c)
-        calc(ws,r,LOAD_COL+1+e_idx,
-             f'=IFERROR(IF(OR({aqa}="",{orga}="",{aqa}=0),"—",{orga}/{aqa}),"—")')
-        # Stripping
-        aq_c  = STRIP_COL+4+e_idx
-        org_c = STRIP_COL+4+N_EL+e_idx
-        aqa=ad(inp_r,aq_c); orga=ad(inp_r,org_c)
-        calc(ws,r,STRIP_COL+1+e_idx,
-             f'=IFERROR(IF(OR({aqa}="",{orga}="",{aqa}=0),"—",{orga}/{aqa}),"—")')
-
-# ── Regression summary ─────────────────────────────────────────────────────────
-REG_SUM_ROW = D_DATA_ROW + N_STAGES_REG + 1  # row 17
-ws.row_dimensions[REG_SUM_ROW].height=18
-hdr(ws,REG_SUM_ROW,1,
-    "LOG-LOG REGRESSION SUMMARY  (D = P × [acid]^Q)  — OUTPUT cells feed TDMA Panel B",
-    span=7*N_EL, bg=C["SECHDR"], sz=10)
-
-RS_COL_HDR = REG_SUM_ROW+1
-ws.row_dimensions[RS_COL_HDR].height=30
-reg_labels=["Element","P_loading","Q_loading","R²_load","P_strip","Q_strip","R²_strip"]
-for i,lbl in enumerate(reg_labels):
-    hdr(ws,RS_COL_HDR,1+i,lbl)
-
-# acid N column: LOAD col 2, rows INP_ROW_BASE to INP_ROW_BASE+2
-load_acid_range = f"{ad(INP_ROW_BASE,LOAD_COL+1)}:{ad(INP_ROW_BASE+2,LOAD_COL+1)}"
-strip_acid_range= f"{ad(INP_ROW_BASE,STRIP_COL+1)}:{ad(INP_ROW_BASE+2,STRIP_COL+1)}"
-
-REG_CELLS = {}   # element -> dict of (row,col) for P_load,Q_load,P_strip,Q_strip
-RS_DATA_ROW = RS_COL_HDR+1  # row 19
-
-def rq(d_range, acid_range):
-    return (f'=IFERROR(IF(COUNTA({d_range})<2,"Need≥2",'
-            f'SLOPE(LN(IF(ISNUMBER({d_range}),{d_range},1)),'
-            f'LN(IF(ISNUMBER({acid_range}),{acid_range},1)))),"N/A")')
-
-def rp(d_range, acid_range):
-    return (f'=IFERROR(IF(COUNTA({d_range})<2,"Need≥2",'
-            f'EXP(INTERCEPT(LN(IF(ISNUMBER({d_range}),{d_range},1)),'
-            f'LN(IF(ISNUMBER({acid_range}),{acid_range},1))))),"N/A")')
-
-def rr2(d_range, acid_range):
-    return (f'=IFERROR(IF(COUNTA({d_range})<2,"Need≥2",'
-            f'RSQ(LN(IF(ISNUMBER({d_range}),{d_range},1)),'
-            f'LN(IF(ISNUMBER({acid_range}),{acid_range},1)))),"N/A")')
-
-for e_idx,elem in enumerate(ELEMENTS):
-    r = RS_DATA_ROW + e_idx
-    ws.row_dimensions[r].height=15
-    sc(ws,r,1,C["STEP_BG"],C["STEP_FG"],val=elem)
-
-    ld_col = LOAD_COL+1+e_idx   # D column in D table
-    st_col = STRIP_COL+1+e_idx
-    ld_d_range = f"{ad(D_DATA_ROW,ld_col)}:{ad(D_DATA_ROW+2,ld_col)}"
-    st_d_range = f"{ad(D_DATA_ROW,st_col)}:{ad(D_DATA_ROW+2,st_col)}"
-
-    out(ws,r,2, rp(ld_d_range, load_acid_range))
-    out(ws,r,3, rq(ld_d_range, load_acid_range))
-    calc(ws,r,4,rr2(ld_d_range, load_acid_range))
-    out(ws,r,5, rp(st_d_range, strip_acid_range))
-    out(ws,r,6, rq(st_d_range, strip_acid_range))
-    calc(ws,r,7,rr2(st_d_range, strip_acid_range))
-
-    REG_CELLS[elem]={"P_load":(r,2),"Q_load":(r,3),
-                     "P_strip":(r,5),"Q_strip":(r,6)}
+# Note: Regression is on the "Regression" sheet. Panel B P/Q values are
+# cross-sheet linked from Regression!cols C-D (P_load,Q_load) and H-I (P_strip,Q_strip).
 
 # ══════════════════════════════════════════════════════════════════════════════
-# TDMA INPUT PANELS  (start after regression + spacer)
+# TDMA INPUT PANELS  (start at row 4 — no Section 0 needed here)
 # ══════════════════════════════════════════════════════════════════════════════
-TDMA_START = RS_DATA_ROW + N_EL + 2   # row ~47
+TDMA_START = 4
 
 ws.row_dimensions[TDMA_START].height=20
 ws.merge_cells(f"A{TDMA_START}:{get_column_letter(30)}{TDMA_START}")
@@ -360,7 +517,7 @@ for e_idx,elem in enumerate(ELEMENTS):
     sc(ws,r,PB_COL,C["STEP_BG"],C["STEP_FG"],val=elem)
     reg=REG_CELLS[elem]
     def linked(rr,cc,defval):
-        ref_=cr(rr,cc)
+        ref_=f"Regression!${get_column_letter(cc)}${rr}"
         return f'=IFERROR(IF(ISNUMBER({ref_}),{ref_},{defval}),{defval})'
     out(ws,r,PB_COL+1, linked(*reg["P_load"], P_DEF[elem]))
     out(ws,r,PB_COL+2, linked(*reg["Q_load"], Q_DEF_LOAD[elem]))
@@ -1046,6 +1203,12 @@ with zipfile.ZipFile(tmp, "r") as zin, zipfile.ZipFile(OUT, "w", zipfile.ZIP_DEF
     sh_xml = zin.read(SHEET_FNAME).decode()
     drawing_elem = f'<drawing r:id="rId{next_rid}"/>'
     if drawing_elem not in sh_xml:
+        # Ensure r: namespace is declared on the root <worksheet> element
+        if 'xmlns:r=' not in sh_xml[:500]:
+            sh_xml = sh_xml.replace(
+                '<worksheet ',
+                '<worksheet xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" ',
+                1)
         # Insert before </worksheet>
         sh_xml = sh_xml.replace("</worksheet>", drawing_elem + "</worksheet>")
     new_files[SHEET_FNAME] = sh_xml.encode()
